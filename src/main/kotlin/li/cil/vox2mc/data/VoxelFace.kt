@@ -4,7 +4,7 @@ import li.cil.vox2mc.vox.Voxel
 
 data class VoxelFace(val voxel: Voxel, val direction: Direction) {
     // Face position projected to face plane. Z value is depth in plane to keep layers separated.
-    val projectedPosition = direction.project(voxel.position)
+    val projectedPosition = direction.projectFromVoxSpace(voxel.position)
 
     fun fourNeighbors() = sequenceOf(
         projectedPosition + Int3(1, 0, 0),

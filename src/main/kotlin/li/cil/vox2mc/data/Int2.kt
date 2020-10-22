@@ -19,7 +19,7 @@ data class Int2(val x: Int, val y: Int) {
 fun dot(a: Int2, b: Int2) = a.x * b.x + a.y * b.y
 fun cross(a: Int2, b: Int2) = a.x * b.y - a.y * b.x
 
-fun clamp(v: Int2, min: Int2, max: Int2) = Int2(
-    max(min.x, min(max.x, v.x)),
-    max(min.y, min(max.y, v.y))
-)
+fun min(a: Int2, b: Int2) = Int2(min(a.x, b.x), min(a.y, b.y))
+fun max(a: Int2, b: Int2) = Int2(max(a.x, b.x), max(a.y, b.y))
+
+fun clamp(v: Int2, min: Int2, max: Int2) = max(min, min(max, v))

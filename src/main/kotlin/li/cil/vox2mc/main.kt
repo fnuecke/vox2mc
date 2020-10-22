@@ -81,7 +81,7 @@ fun main(args: Array<String>) {
 
         print("Building convex quads from grouped faces...")
 
-        val blockFaces = groupedFaces.forEach { faceGroup ->
+        val blockFaces = groupedFaces.flatMap { faceGroup ->
             // NB: the depth (z component) of all face positions in one group is equal, so we can safely drop it.
             val facesByProjectedPosition = faceGroup.map { it.projectedPosition.toInt2() to it }.toMap()
             // Generate outlines from face grid. Outer edges are encoded with clockwise winding,
@@ -317,10 +317,19 @@ fun main(args: Array<String>) {
             val rectangles = rectangleByEdge.values.distinct()
             assert(rectangles.all { it.size == 4 })
 
-            TODO()
+            rectangles.map { rectangle ->
+                val faceNormal = faceGroup[0].direction
+                val z = faceGroup[0].projectedPosition.z
+
+                val corners = rectangle.map { faceNormal.unprojectToMinecraftSpace(Int3(it.position, z)) }
+                val minCorner = corners.fold(corners[0]) { acc, vertex -> min(acc, vertex) }
+                val maxCorner = corners.fold(corners[0]) { acc, vertex -> max(acc, vertex) }
+
+                BlockFace(minCorner, maxCorner, faceNormal)
+            }
         }
 
-        println(" done. Got %d quads.")
+        println(" done. Got %d quads.".format(blockFaces.size))
 
         print("Saving textures and UVs...")
 
@@ -341,3 +350,5 @@ fun main(args: Array<String>) {
         println(" done.")
     }
 }
+
+data class BlockFace(val from: Int3, val to: Int3, val normal: Direction)
