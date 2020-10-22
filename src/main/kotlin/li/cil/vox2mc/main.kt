@@ -1,11 +1,11 @@
 package li.cil.vox2mc
 
+import li.cil.vox2mc.algorithm.hopcroftKarp
+import li.cil.vox2mc.algorithm.intersectPerpendicularEdges
+import li.cil.vox2mc.algorithm.intersectRayEdge
 import li.cil.vox2mc.data.*
 import li.cil.vox2mc.vox.*
 import java.io.File
-import kotlin.math.abs
-import kotlin.math.min
-import kotlin.math.sign
 
 fun main(args: Array<String>) {
     if (args.isEmpty()) {
@@ -81,7 +81,7 @@ fun main(args: Array<String>) {
 
         print("Building convex quads from grouped faces...")
 
-        groupedFaces.forEach { faceGroup ->
+        val blockFaces = groupedFaces.forEach { faceGroup ->
             // NB: the depth (z component) of all face positions in one group is equal, so we can safely drop it.
             val facesByProjectedPosition = faceGroup.map { it.projectedPosition.toInt2() to it }.toMap()
             // Generate outlines from face grid. Outer edges are encoded with clockwise winding,
@@ -317,7 +317,7 @@ fun main(args: Array<String>) {
             val rectangles = rectangleByEdge.values.distinct()
             assert(rectangles.all { it.size == 4 })
 
-            println("Number of rectangles is %d".format(rectangles.size))
+            TODO()
         }
 
         println(" done. Got %d quads.")
@@ -340,216 +340,4 @@ fun main(args: Array<String>) {
 
         println(" done.")
     }
-}
-
-private data class Vertex(val position: Int2, var edgeIn: DirectedEdge? = null, var edgeOut: DirectedEdge? = null) {
-    fun prev() = requireNotNull(edgeIn).from
-    fun next() = requireNotNull(edgeOut).to
-
-    fun isCollinear(): Boolean {
-        val prevPos = prev().position
-        val nextPos = next().position
-        val delta = nextPos - prevPos
-        return delta.x == 0 || delta.y == 0
-    }
-
-    fun remove() {
-        val edge = DirectedEdge(prev(), next())
-        prev().edgeOut = edge
-        next().edgeIn = edge
-    }
-
-    fun split(): Pair<Vertex, Vertex> {
-        val vertexFrom = Vertex(position)
-        val edgeFrom = DirectedEdge(edgeIn!!.from, vertexFrom)
-        edgeFrom.from.edgeOut = edgeFrom
-        vertexFrom.edgeIn = edgeFrom
-
-        val vertexTo = Vertex(position)
-        val edgeTo = DirectedEdge(vertexTo, edgeOut!!.to)
-        edgeTo.to.edgeIn = edgeTo
-        vertexTo.edgeOut = edgeTo
-
-        return Pair(vertexFrom, vertexTo)
-    }
-
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (javaClass != other?.javaClass) return false
-
-        other as Vertex
-
-        if (position != other.position) return false
-
-        return true
-    }
-
-    override fun hashCode(): Int {
-        return position.hashCode()
-    }
-
-    override fun toString() = "li.cil.vox2mc.Vertex(position=$position)"
-}
-
-private data class DirectedEdge(val from: Vertex, val to: Vertex) {
-    fun split(v: Int2): Pair<Vertex, Vertex> {
-        val vertexFrom = Vertex(v)
-        val edgeFrom = DirectedEdge(from, vertexFrom)
-        from.edgeOut = edgeFrom
-        vertexFrom.edgeIn = edgeFrom
-
-        val vertexTo = Vertex(v)
-        val edgeTo = DirectedEdge(vertexTo, to)
-        to.edgeIn = edgeTo
-        vertexTo.edgeOut = edgeTo
-
-        return Pair(vertexFrom, vertexTo)
-    }
-}
-
-private data class Edge(val a: Int2, val b: Int2) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (javaClass != other?.javaClass) return false
-
-        other as Edge
-
-        if (a == other.a && b == other.b) return true
-        if (a == other.b && b == other.a) return true
-
-        return false
-    }
-
-    override fun hashCode() = a.hashCode() xor b.hashCode()
-}
-
-private data class VoxelFace(val voxel: Voxel, val direction: Direction) {
-    // Face position projected to face plane. Z value is depth in plane to keep layers separated.
-    val projectedPosition = direction.project(voxel.position)
-
-    fun fourNeighbors() = sequenceOf(
-        projectedPosition + Int3(1, 0, 0),
-        projectedPosition - Int3(1, 0, 0),
-        projectedPosition + Int3(0, 1, 0),
-        projectedPosition - Int3(0, 1, 0)
-    )
-
-    fun min() = projectedPosition.toInt2()
-    fun max() = projectedPosition.toInt2() + Int2(1, 1)
-}
-
-// Intersects two perpendicular axis aligned edges.
-// Will not intersect collinear edges.
-private fun intersectPerpendicularEdges(a0: Int2, a1: Int2, b0: Int2, b1: Int2): Boolean {
-    if (dot(a1 - a0, b1 - b0) != 0) {
-        return false
-    }
-
-    fun intersects(e0: Int2, e1: Int2, p: Int2): Boolean {
-        val t = dot(project(p, e0, e1) - e0, e1 - e0)
-        return t >= 0 && t <= dot(e1 - e0, e1 - e0)
-    }
-
-    return intersects(a0, a1, b0) &&
-            intersects(a0, a1, b1) &&
-            intersects(b0, b1, a0) &&
-            intersects(b0, b1, a1)
-}
-
-private fun project(p: Int2, e0: Int2, e1: Int2): Int2 {
-    val v0 = e1 - e0
-    val v1 = p - e0
-    return e0 + v0 * dot(v0, v1) / dot(v0, v0)
-}
-
-// Intersect axis aligned ray with axis aligned edge.
-// Will not intersect with edge a ray starts on.
-// Will not intersect edges that go counter-clockwise from ray's view.
-// Will intersect with collinear edges.
-private fun intersectRayEdge(start: Int2, direction: Int2, e0: Int2, e1: Int2): Int2? {
-    val v0 = start - e0
-    val v1 = e1 - e0
-    val v2 = direction.leftHandNormal()
-
-    val det = dot(v1, v2)
-    if (det == 0) {
-        return if (cross(v1, v0) == 0) { // collinear
-            val t0 = dot(e0 - start, direction)
-            val t1 = dot(e1 - start, direction)
-            assert(t0.sign == t1.sign) { "start point inside line" }
-            val t = min(t0, t1)
-            if (t <= 0) null else start + direction * t
-        } else { // parallel
-            null
-        }
-    } else { // perpendicular
-        assert(v1.x == 0 || v1.y == 0)
-        if (dot(v2, v1) >= 0) return null // Only return clockwise edges.
-        val elen = abs(v1.x + v1.y)
-        val t0 = cross(v1, v0) / det
-        val t1 = dot(v0, v2) * elen / det
-        return if (t0 <= 0 || t1 < 0 || t1 > elen) null else start + direction * t0
-    }
-}
-
-// https://en.wikipedia.org/wiki/Hopcroft%E2%80%93Karp_algorithm
-private fun <T> hopcroftKarp(us: Set<T>, adjacent: Map<T, Set<T>>): Map<T, T> {
-    val pairU = mutableMapOf<T, T>()
-    val pairV = mutableMapOf<T, T>()
-    val dist = mutableMapOf<T?, Float>()
-
-    // Find shortest paths from unpaired us to unpaired vs.
-    fun bfs(): Boolean {
-        val (paired, unpaired) = us.partition { pairU.containsKey(it) }
-        paired.forEach { dist[it] = Float.POSITIVE_INFINITY }
-        unpaired.forEach { dist[it] = 0f }
-
-        val queue: MutableList<T?> = unpaired.toMutableList()
-        dist[null] = Float.POSITIVE_INFINITY // best distance to unmapped v
-        while (queue.isNotEmpty()) {
-            val u = queue.removeAt(0)
-            // dist of u to unmapped v < best dist and u != null check
-            if (dist.getValue(u) < dist.getValue(null)) {
-                assert(u != null)
-                adjacent[u]?.forEach { v ->
-                    if (dist.getValue(pairV[v]).isInfinite()) { // paired to paired u or unpaired
-                        dist[pairV[v]] = dist.getValue(u) + 1
-                        queue.add(pairV[v])
-                    }
-                }
-            }
-        }
-        return !dist.getValue(null).isInfinite() // best distance != infinity -> found new best path
-    }
-
-    fun dfs(u: T?): Boolean {
-        if (u != null) {
-            adjacent[u]?.forEach { v ->
-                if (dist.getValue(pairV[v]) == dist.getValue(u) + 1) {
-                    if (dfs(pairV[v])) {
-                        pairV[v] = u
-                        pairU[u] = v
-                        return true
-                    }
-                }
-            }
-            dist[u] = Float.POSITIVE_INFINITY
-            return false
-        }
-        return true
-    }
-
-    var matching = 0
-    while (bfs()) {
-        us.forEach { u ->
-            if (pairU[u] == null) {
-                if (dfs(u)) {
-                    matching++
-                }
-            }
-        }
-    }
-
-    assert(pairU.size == matching)
-    return pairU
 }
