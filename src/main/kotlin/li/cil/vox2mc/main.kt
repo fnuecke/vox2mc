@@ -321,11 +321,11 @@ fun main(args: Array<String>) {
                 val faceNormal = faceGroup[0].direction
                 val z = faceGroup[0].projectedPosition.z
 
-                val corners = rectangle.map { faceNormal.unprojectToMinecraftSpace(Int3(it.position, z)) }
+                val corners = rectangle.map { faceNormal.unprojectVertexToMinecraftSpace(Int3(it.position, z)) }
                 val minCorner = corners.fold(corners[0]) { acc, vertex -> min(acc, vertex) }
                 val maxCorner = corners.fold(corners[0]) { acc, vertex -> max(acc, vertex) }
 
-                BlockFace(minCorner, maxCorner, faceNormal)
+                BlockFace(minCorner, maxCorner, faceNormal.fromVoxToMinecraftSpace())
             }
         }
 
