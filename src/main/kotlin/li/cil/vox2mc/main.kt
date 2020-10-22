@@ -1,11 +1,15 @@
 package li.cil.vox2mc
 
+import com.google.gson.Gson
 import li.cil.vox2mc.algorithm.hopcroftKarp
 import li.cil.vox2mc.algorithm.intersectPerpendicularEdges
 import li.cil.vox2mc.algorithm.intersectRayEdge
 import li.cil.vox2mc.data.*
 import li.cil.vox2mc.vox.*
 import java.io.File
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Paths
 
 fun main(args: Array<String>) {
     if (args.isEmpty()) {
@@ -147,6 +151,11 @@ fun main(args: Array<String>) {
             // Find smallest number of rectangles filling the outline graph. Based on arXiv:0908.3916: David Eppstein,
             // Graph-Theoretic Solutions to Computational Geometry Problems, specifically chapter 3, Partition into
             // rectangles. https://arxiv.org/abs/0908.3916
+            // Additional references:
+            // - https://en.wikipedia.org/wiki/Bipartite_graph
+            // - https://en.wikipedia.org/wiki/Intersection_graph
+            // - https://en.wikipedia.org/wiki/Matching_(graph_theory)
+            // - https://en.wikipedia.org/wiki/Hopcroft–Karp_algorithm
 
             // Grab all concave vertices.
             val concaveVertices = allVertices.filter { vertex ->
@@ -376,8 +385,8 @@ fun main(args: Array<String>) {
 
         log("Saving block model...")
 
-        // generate mc json, one element per block face
-        // TODO
+        val blockModel = BlockModel(mapOf("all" to "computer.png"), blockFaces.map { it.toElement() }.toTypedArray())
+        Files.writeString(Paths.get("model.json"), Gson().toJson(blockModel), StandardCharsets.UTF_8)
 
         logln(" done.")
     }

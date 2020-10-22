@@ -10,6 +10,15 @@ enum class Direction(val normal: Int3) {
     POSZ(Int3(0, 0, 1)),
     NEGZ(Int3(0, 0, -1));
 
+    fun getFaceName(): String = when (this) {
+        POSX -> "east"
+        NEGX -> "west"
+        POSY -> "up"
+        NEGY -> "down"
+        POSZ -> "south"
+        NEGZ -> "north"
+    }
+
     fun fromVoxToMinecraftSpace() = when (this) {
         POSX -> POSX
         NEGX -> NEGX
