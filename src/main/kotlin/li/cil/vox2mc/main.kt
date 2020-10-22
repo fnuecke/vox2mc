@@ -91,8 +91,8 @@ fun main(args: Array<String>) {
                 val vertexFrom = verticesByProjectedPosition.computeIfAbsent(from) { Vertex(it) }
                 val vertexTo = verticesByProjectedPosition.computeIfAbsent(to) { Vertex(it) }
 
-                require(vertexFrom.edgeOut == null)
-                require(vertexTo.edgeIn == null)
+                assert(vertexFrom.edgeOut == null)
+                assert(vertexTo.edgeIn == null)
 
                 val edge = DirectedEdge(vertexFrom, vertexTo)
                 vertexFrom.edgeOut = edge
@@ -116,39 +116,18 @@ fun main(args: Array<String>) {
                 }
             }
 
-            // Remove collinear vertices.
-            val allVertices = verticesByProjectedPosition.values.filter { vertex ->
-                val prevPos = vertex.prev().position
-                val nextPos = vertex.next().position
-                val delta = nextPos - prevPos
-                if (delta.x == 0 || delta.y == 0) {
-                    val edge = DirectedEdge(vertex.prev(), vertex.next())
-                    vertex.prev().edgeOut = edge
-                    vertex.next().edgeIn = edge
-                    false
-                } else {
-                    true
-                }
-            }
+            val (collinearVertices, allVertices) = verticesByProjectedPosition.values.partition { it.isCollinear() }
+            collinearVertices.forEach { it.remove() }
+            verticesByProjectedPosition -= collinearVertices.map { it.position }
 
             // TODO Some index structure for faster intersection tests.
-            val gridEdges = allVertices.flatMap { sequenceOf(it.edgeIn, it.edgeOut) }.requireNoNulls().distinct()
-            fun intersectRayGridEdges(start: Int2, direction: Int2) =
-                gridEdges.mapNotNull { intersectRayEdge(start, direction, it.from.position, it.to.position) }
-                    .minByOrNull { it.sqDistanceTo(start) }
+            val allEdges = allVertices.flatMap { sequenceOf(it.edgeIn, it.edgeOut) }
+                .requireNoNulls().distinct().toMutableSet()
 
-            // Separate curves.
-            val curves = mutableListOf<MutableSet<Vertex>>()
-            allVertices.forEach { vertex ->
-                if (curves.none { it.contains(vertex) }) {
-                    val set = mutableSetOf(vertex)
-                    var next = vertex.next()
-                    while (set.add(next)) {
-                        next = next.next()
-                    }
-                    curves.add(set)
-                }
-            }
+            fun intersectRayGridEdges(start: Int2, direction: Int2) =
+                allEdges.mapNotNull { edge ->
+                    intersectRayEdge(start, direction, edge.from.position, edge.to.position)?.let { it to edge }
+                }.minByOrNull { it.first.sqDistanceTo(start) }
 
             // Find smallest number of rectangles filling the outline graph. Based on arXiv:0908.3916: David Eppstein,
             // Graph-Theoretic Solutions to Computational Geometry Problems, specifically chapter 3, Partition into
@@ -179,8 +158,9 @@ fun main(args: Array<String>) {
                 sequenceOf(
                     intersectRayGridEdges(curr, direction0),
                     intersectRayGridEdges(curr, direction1)
-                ).filterNotNull()
-                    .mapNotNull { if (concaveVertexPositions.contains(it)) Edge(curr, it) else null }
+                ).filterNotNull().map { it.first }.mapNotNull {
+                    if (concaveVertexPositions.contains(it)) Edge(curr, it) else null
+                }
             }.distinct()
 
             // Find maximum set of non-intersecting good diagonals:
@@ -192,39 +172,43 @@ fun main(args: Array<String>) {
                     if (intersectPerpendicularEdges(u.a, u.b, v.a, v.b)) sequenceOf(u to v, v to u) else emptySequence()
                 }
             }.groupBy { it.first }.mapValues { e -> e.value.map { it.second }.toSet() }
-            val groupedIntersections = mutableListOf<Map<Edge, Set<Edge>>>()
-            allIntersections.forEach { entry ->
-                if (groupedIntersections.none { it.containsKey(entry.key) }) {
-                    val group = mutableMapOf(entry.key to entry.value)
-                    fun addRecursively(s: Set<Edge>) {
-                        s.forEach {
-                            if (!group.containsKey(it)) {
-                                val intersections = allIntersections.getValue(it)
-                                group[it] = intersections
-                                addRecursively(intersections)
-                            }
-                        }
-                    }
-                    addRecursively(entry.value)
-                    groupedIntersections.add(group)
+
+            val maximumMatching = hopcroftKarp(horizontalDiagonals, allIntersections)
+
+            val matchedAdjacency = maximumMatching + maximumMatching.map { it.value to it.key }
+            assert(matchedAdjacency.size == maximumMatching.size * 2)
+            val unmatchedAdjacency = allIntersections
+                .mapValues { (key, value) -> value.filter { matchedAdjacency[it] != key } }
+                .filterValues { it.isNotEmpty() }
+
+            val minDistances = goodDiagonals.map { it to Integer.MAX_VALUE }.toMap().toMutableMap()
+            var traverseUnmatched: (Edge, Int) -> Unit = fun(_: Edge, _: Int) {}
+            fun traverseMatched(e: Edge, depth: Int) {
+                if (minDistances[e]!! <= depth) {
+                    return
+                }
+                minDistances[e] = depth
+                matchedAdjacency[e]?.let {
+                    traverseUnmatched(it, depth + 1)
                 }
             }
-
-            val selectedPartitions = groupedIntersections.flatMap { intersections ->
-                val diagonals = intersections.keys
-                val (horizontals, verticals) = diagonals.partition { it.a.y == it.b.y }
-
-                val maximumMatching = hopcroftKarp(horizontals.toSet(), verticals.toSet(), intersections)
-                val matchedDiagonals = (maximumMatching.keys + maximumMatching.values).toSet()
-                val unmatchedDiagonals = diagonals.filter { !matchedDiagonals.contains(it) }
-                val anyUnmatchedDiagonal = unmatchedDiagonals.first() // Could be any, we just pick the first one.
-
-                val partition = diagonals.map { dijkstra(it, anyUnmatchedDiagonal, intersections) to it }
-                    .groupBy { it.first }.mapValues { v -> v.value.map { it.second } }
-
-                // Select partitions with even path-lengths.
-                partition.keys.filter { (it % 2) == 0 }.flatMap { partition.getValue(it) }
+            traverseUnmatched = fun(e: Edge, depth: Int) {
+                if (minDistances[e]!! <= depth) {
+                    return
+                }
+                minDistances[e] = depth
+                unmatchedAdjacency[e]?.forEach {
+                    traverseMatched(it, depth + 1)
+                }
             }
+            val unmatchedDiagonals = goodDiagonals - matchedAdjacency.keys
+            unmatchedDiagonals.forEach { traverseUnmatched(it, 0) }
+            val selectedPartitions = minDistances.filterValues { it % 2 == 0 }.keys
+
+            val numMatchings = maximumMatching.size
+            val numDiagonals = horizontalDiagonals.size + verticalDiagonals.size
+            val expectedMaximumIntersectionSetSize = numDiagonals - numMatchings
+            assert(selectedPartitions.size == expectedMaximumIntersectionSetSize)
 
             // Assert diagonals from selected partitions do not intersect.
             selectedPartitions.forEachIndexed { index, e0 ->
@@ -232,19 +216,58 @@ fun main(args: Array<String>) {
                     .forEach { e1 -> assert(!intersectPerpendicularEdges(e0.a, e0.b, e1.a, e1.b)) }
             }
 
-            // Find all bad vertices.
-            val badVertices = concaveVertices.filter { v ->
-                selectedPartitions.none { v.position != it.a && v.position != it.b }
+            fun removeVertex(v: Vertex) {
+                v.remove()
+                allEdges.remove(v.edgeIn)
+                allEdges.remove(v.edgeOut)
+                assert(v.edgeIn!!.from.edgeOut!! == v.edgeOut!!.to.edgeIn!!)
+                allEdges.add(v.edgeIn!!.from.edgeOut!!)
             }
 
+            fun splitVertex(v: Vertex): Pair<Vertex, Vertex> {
+                val (vertexFrom, vertexTo) = v.split()
+                allEdges.remove(v.edgeIn)
+                allEdges.remove(v.edgeOut)
+                allEdges.add(v.edgeIn!!.from.edgeOut!!)
+                allEdges.add(v.edgeOut!!.to.edgeIn!!)
+                return Pair(vertexFrom, vertexTo)
+            }
+
+            fun splitEdge(e: DirectedEdge, p: Int2): Pair<Vertex, Vertex> {
+                val (vertexFrom, vertexTo) = e.split(p)
+                allEdges.remove(e)
+                allEdges.add(vertexFrom.edgeIn!!)
+                allEdges.add(vertexTo.edgeOut!!)
+                return Pair(vertexFrom, vertexTo)
+            }
+
+            // Insert selected diagonals as edges into the graph.
+            selectedPartitions.forEach { edge ->
+                val vertex0 = verticesByProjectedPosition[edge.a]!!
+                val (vertexFrom0, vertexTo0) = splitVertex(vertex0)
+                val vertex1 = verticesByProjectedPosition[edge.b]!!
+                val (vertexFrom1, vertexTo1) = splitVertex(vertex1)
+
+                val edge0 = DirectedEdge(vertexFrom0, vertexTo1)
+                vertexFrom0.edgeOut = edge0
+                vertexTo1.edgeIn = edge0
+                allEdges.add(edge0)
+
+                val edge1 = DirectedEdge(vertexFrom1, vertexTo0)
+                vertexFrom1.edgeOut = edge1
+                vertexTo0.edgeIn = edge1
+                allEdges.add(edge1)
+
+                sequenceOf(vertexFrom0, vertexTo0, vertexFrom1, vertexTo1)
+                    .filter { it.isCollinear() }.forEach { removeVertex(it) }
+            }
+
+            // Find all bad vertices.
+            val badVertices = concaveVertices.filter { v ->
+                selectedPartitions.none { v.position == it.a || v.position == it.b }
+            }
 
             // Connect each bad vertex to closest existing edge.
-            val extraEdges = selectedPartitions.toMutableList()
-            fun intersectRayAllEdges(start: Int2, direction: Int2) =
-                (gridEdges.mapNotNull { intersectRayEdge(start, direction, it.from.position, it.to.position) } +
-                        extraEdges.mapNotNull { intersectRayEdge(start, direction, it.a, it.b) })
-                    .minByOrNull { it.sqDistanceTo(start) }
-
             badVertices.forEach { vertex ->
                 val curr = vertex.position
                 val prev = vertex.prev().position
@@ -252,25 +275,49 @@ fun main(args: Array<String>) {
                 val direction0 = (curr - prev).normalizeAxisAligned()
                 val direction1 = direction0.rightHandNormal()
 
-                val intersect0 = requireNotNull(intersectRayAllEdges(curr, direction0))
-                val intersect1 = requireNotNull(intersectRayAllEdges(curr, direction1))
+                val (hitPosition0, hitEdge0) = intersectRayGridEdges(curr, direction0)!!
+                val (hitPosition1, hitEdge1) = intersectRayGridEdges(curr, direction1)!!
 
-                val sqDistance0 = curr.sqDistanceTo(intersect0)
-                val sqDistance1 = curr.sqDistanceTo(intersect1)
-                if (sqDistance0 < sqDistance1) {
-                    extraEdges.add(Edge(curr, intersect0))
+                val sqDistance0 = curr.sqDistanceTo(hitPosition0)
+                val sqDistance1 = curr.sqDistanceTo(hitPosition1)
+                val (vertexFrom0, vertexTo0) = if (sqDistance0 < sqDistance1) {
+                    splitEdge(hitEdge0, hitPosition0)
                 } else {
-                    extraEdges.add(Edge(curr, intersect1))
+                    splitEdge(hitEdge1, hitPosition1)
                 }
+
+                val (vertexFrom1, vertexTo1) = splitVertex(vertex)
+
+                val edge0 = DirectedEdge(vertexFrom0, vertexTo1)
+                vertexFrom0.edgeOut = edge0
+                vertexTo1.edgeIn = edge0
+                allEdges.add(edge0)
+
+                val edge1 = DirectedEdge(vertexFrom1, vertexTo0)
+                vertexFrom1.edgeOut = edge1
+                vertexTo0.edgeIn = edge1
+                allEdges.add(edge1)
+
+                sequenceOf(vertexFrom0, vertexTo0, vertexFrom1, vertexTo1)
+                    .filter { it.isCollinear() }.forEach { removeVertex(it) }
             }
 
-            // While edges are left
-            // - find edge that is only part of one rectangle.
-            // - generate quad from this rectangle.
-            // - remove edge and all other edges of the rect that were only part of that rect
-            // TODO
+            // Separate rectangles.
+            val rectangleByEdge = mutableMapOf<DirectedEdge, List<Vertex>>()
+            allEdges.forEach { edge ->
+                val rectangle = mutableListOf<Vertex>()
+                var curr = edge
+                do {
+                    rectangleByEdge[curr] = rectangle
+                    rectangle.add(curr.to)
+                    curr = curr.to.edgeOut!!
+                } while (curr != edge)
+            }
 
-//            val groupedCurves = curves.groupBy { it.first().isHole() }
+            val rectangles = rectangleByEdge.values.distinct()
+            assert(rectangles.all { it.size == 4 })
+
+            println("Number of rectangles is %d".format(rectangles.size))
         }
 
         println(" done. Got %d quads.")
@@ -299,18 +346,32 @@ private data class Vertex(val position: Int2, var edgeIn: DirectedEdge? = null, 
     fun prev() = requireNotNull(edgeIn).from
     fun next() = requireNotNull(edgeOut).to
 
-    fun signedArea(): Int {
-        var curr = this
-        var sum = 0
-        do {
-            val next = curr.next()
-            sum += (next.position.x - curr.position.x) * (next.position.y + curr.position.y)
-            curr = next
-        } while (curr != this)
-        return sum
+    fun isCollinear(): Boolean {
+        val prevPos = prev().position
+        val nextPos = next().position
+        val delta = nextPos - prevPos
+        return delta.x == 0 || delta.y == 0
     }
 
-    fun isHole() = signedArea() < 0
+    fun remove() {
+        val edge = DirectedEdge(prev(), next())
+        prev().edgeOut = edge
+        next().edgeIn = edge
+    }
+
+    fun split(): Pair<Vertex, Vertex> {
+        val vertexFrom = Vertex(position)
+        val edgeFrom = DirectedEdge(edgeIn!!.from, vertexFrom)
+        edgeFrom.from.edgeOut = edgeFrom
+        vertexFrom.edgeIn = edgeFrom
+
+        val vertexTo = Vertex(position)
+        val edgeTo = DirectedEdge(vertexTo, edgeOut!!.to)
+        edgeTo.to.edgeIn = edgeTo
+        vertexTo.edgeOut = edgeTo
+
+        return Pair(vertexFrom, vertexTo)
+    }
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -330,7 +391,22 @@ private data class Vertex(val position: Int2, var edgeIn: DirectedEdge? = null, 
     override fun toString() = "li.cil.vox2mc.Vertex(position=$position)"
 }
 
-private data class DirectedEdge(val from: Vertex, val to: Vertex)
+private data class DirectedEdge(val from: Vertex, val to: Vertex) {
+    fun split(v: Int2): Pair<Vertex, Vertex> {
+        val vertexFrom = Vertex(v)
+        val edgeFrom = DirectedEdge(from, vertexFrom)
+        from.edgeOut = edgeFrom
+        vertexFrom.edgeIn = edgeFrom
+
+        val vertexTo = Vertex(v)
+        val edgeTo = DirectedEdge(vertexTo, to)
+        to.edgeIn = edgeTo
+        vertexTo.edgeOut = edgeTo
+
+        return Pair(vertexFrom, vertexTo)
+    }
+}
+
 private data class Edge(val a: Int2, val b: Int2) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -349,7 +425,7 @@ private data class Edge(val a: Int2, val b: Int2) {
 
 private data class VoxelFace(val voxel: Voxel, val direction: Direction) {
     // Face position projected to face plane. Z value is depth in plane to keep layers separated.
-    val projectedPosition = project(voxel.position, direction)
+    val projectedPosition = direction.project(voxel.position)
 
     fun fourNeighbors() = sequenceOf(
         projectedPosition + Int3(1, 0, 0),
@@ -360,37 +436,24 @@ private data class VoxelFace(val voxel: Voxel, val direction: Direction) {
 
     fun min() = projectedPosition.toInt2()
     fun max() = projectedPosition.toInt2() + Int2(1, 1)
-
-    private fun project(position: Int3, direction: Direction): Int3 {
-        fun invert(i: Int) = MODEL_RESOLUTION - 1 - i
-        return when (direction) {
-            Direction.POSX -> Int3(position.y, position.z, invert(position.x))
-            Direction.NEGX -> Int3(invert(position.y), position.z, position.x)
-            Direction.POSY -> Int3(invert(position.x), position.z, invert(position.y))
-            Direction.NEGY -> Int3(position.x, position.z, position.y)
-            Direction.POSZ -> Int3(position.x, position.y, invert(position.z))
-            Direction.NEGZ -> Int3(position.x, invert(position.y), position.z)
-        }
-    }
 }
 
 // Intersects two perpendicular axis aligned edges.
-// Will not intersect if either edge is only touched at an end point.
 // Will not intersect collinear edges.
 private fun intersectPerpendicularEdges(a0: Int2, a1: Int2, b0: Int2, b1: Int2): Boolean {
     if (dot(a1 - a0, b1 - b0) != 0) {
         return false
     }
 
-    return fullyContains(a0, a1, b0) &&
-            fullyContains(a0, a1, b1) &&
-            fullyContains(b0, b1, a0) &&
-            fullyContains(b0, b1, a1)
-}
+    fun intersects(e0: Int2, e1: Int2, p: Int2): Boolean {
+        val t = dot(project(p, e0, e1) - e0, e1 - e0)
+        return t >= 0 && t <= dot(e1 - e0, e1 - e0)
+    }
 
-private fun fullyContains(e0: Int2, e1: Int2, p: Int2): Boolean {
-    val t = dot(project(p, e0, e1) - e0, e1 - e0)
-    return t > 0 && t < dot(e1 - e0, e1 - e0)
+    return intersects(a0, a1, b0) &&
+            intersects(a0, a1, b1) &&
+            intersects(b0, b1, a0) &&
+            intersects(b0, b1, a1)
 }
 
 private fun project(p: Int2, e0: Int2, e1: Int2): Int2 {
@@ -401,6 +464,7 @@ private fun project(p: Int2, e0: Int2, e1: Int2): Int2 {
 
 // Intersect axis aligned ray with axis aligned edge.
 // Will not intersect with edge a ray starts on.
+// Will not intersect edges that go counter-clockwise from ray's view.
 // Will intersect with collinear edges.
 private fun intersectRayEdge(start: Int2, direction: Int2, e0: Int2, e1: Int2): Int2? {
     val v0 = start - e0
@@ -409,17 +473,18 @@ private fun intersectRayEdge(start: Int2, direction: Int2, e0: Int2, e1: Int2): 
 
     val det = dot(v1, v2)
     if (det == 0) {
-        if (cross(v1, v0) == 0) { // collinear
+        return if (cross(v1, v0) == 0) { // collinear
             val t0 = dot(e0 - start, direction)
             val t1 = dot(e1 - start, direction)
             assert(t0.sign == t1.sign) { "start point inside line" }
             val t = min(t0, t1)
-            return if (t <= 0) null else start + direction * t
+            if (t <= 0) null else start + direction * t
         } else { // parallel
-            return null
+            null
         }
     } else { // perpendicular
         assert(v1.x == 0 || v1.y == 0)
+        if (dot(v2, v1) >= 0) return null // Only return clockwise edges.
         val elen = abs(v1.x + v1.y)
         val t0 = cross(v1, v0) / det
         val t1 = dot(v0, v2) * elen / det
@@ -427,33 +492,8 @@ private fun intersectRayEdge(start: Int2, direction: Int2, e0: Int2, e1: Int2): 
     }
 }
 
-fun <T> dijkstra(source: T, target: T, adjacent: Map<T, Set<T>>): Int {
-    val q = adjacent.keys.toMutableSet()
-    val dist = q.map { it to Int.MAX_VALUE }.toMap().toMutableMap()
-    val prev = mutableMapOf<T, T>()
-    dist[source] = 0
-
-    while (q.isNotEmpty()) {
-        val u = requireNotNull(q.mapNotNull { it to dist.getValue(it) }.minByOrNull { it.second }?.first)
-
-        if (u == target) {
-            return dist.getValue(u)
-        }
-
-        q.remove(u)
-        adjacent[u]?.forEach { v ->
-            if (!dist.containsKey(v) || dist.getValue(v) >= dist.getValue(u)) {
-                dist[v] = dist.getValue(u) + 1
-                prev[v] = u
-            }
-        }
-    }
-
-    return Int.MAX_VALUE
-}
-
 // https://en.wikipedia.org/wiki/Hopcroft%E2%80%93Karp_algorithm
-private fun <T> hopcroftKarp(us: Set<T>, vs: Set<T>, adjacent: Map<T, Set<T>>): Map<T, T> {
+private fun <T> hopcroftKarp(us: Set<T>, adjacent: Map<T, Set<T>>): Map<T, T> {
     val pairU = mutableMapOf<T, T>()
     val pairV = mutableMapOf<T, T>()
     val dist = mutableMapOf<T?, Float>()
