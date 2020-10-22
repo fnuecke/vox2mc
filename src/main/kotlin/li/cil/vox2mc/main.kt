@@ -10,22 +10,37 @@ import java.io.File
 fun main(args: Array<String>) {
     if (args.isEmpty()) {
         println("Usage: vox2mc file.vox ...")
+        return
+    }
+
+    val quiet = args.any { it == "-q" || it == "--quiet" }
+
+    fun log(msg: String) {
+        if (!quiet) print(msg)
+    }
+
+    fun logln(msg: String) {
+        if (!quiet) println(msg)
     }
 
     for (arg in args) {
-        val file = File(arg)
-        if (!file.exists()) {
-            println("File [%s] not found, skipping.".format(arg))
+        if (arg == "-q" || arg == "--quiet") {
             continue
         }
 
-        print("Loading file [%s]...".format(arg))
+        val file = File(arg)
+        if (!file.exists()) {
+            logln("File [%s] not found, skipping.".format(arg))
+            continue
+        }
+
+        log("Loading file [%s]...".format(arg))
 
         val vox = VoxLoader.loadVox(file)
 
-        println(" done.")
+        logln(" done.")
 
-        print("Collecting voxels from loaded file...")
+        log("Collecting voxels from loaded file...")
 
         val paletteChunk = vox.children.find { chunk -> chunk.header.id == ChunkHeader.RGBA_CHUNK_ID }
         val palette = if (paletteChunk != null) {
@@ -48,9 +63,9 @@ fun main(args: Array<String>) {
             }
         }.map { v -> v.position to v }.toMap()
 
-        println(" done. Got %d voxel(s).".format(voxels.size))
+        logln(" done. Got %d voxel(s).".format(voxels.size))
 
-        print("Extracting faces...")
+        log("Extracting faces...")
 
         val allFaces = voxels.values.flatMap { voxel ->
             Direction.values().filterNot {
@@ -58,9 +73,9 @@ fun main(args: Array<String>) {
             }.map { VoxelFace(voxel, it) }
         }
 
-        println(" done. Got %d face(s).".format(allFaces.size))
+        logln(" done. Got %d face(s).".format(allFaces.size))
 
-        print("Grouping adjacent faces...")
+        log("Grouping adjacent faces...")
 
         val groupedFaces = allFaces.groupBy { it.direction }.values.flatMap { faces ->
             val facesByProjectedPosition = faces.map { it.projectedPosition to it }.toMap()
@@ -77,9 +92,9 @@ fun main(args: Array<String>) {
             faces.map { collectFacesRecursively(it).toList() }
         }.filterNot { it.isEmpty() }
 
-        println(" done. Got %d grouped face(s).".format(groupedFaces.size))
+        logln(" done. Got %d grouped face(s).".format(groupedFaces.size))
 
-        print("Building convex quads from grouped faces...")
+        log("Building convex quads from grouped faces...")
 
         val blockFaces = groupedFaces.flatMap { faceGroup ->
             // NB: the depth (z component) of all face positions in one group is equal, so we can safely drop it.
@@ -181,6 +196,7 @@ fun main(args: Array<String>) {
                 .mapValues { (key, value) -> value.filter { matchedAdjacency[it] != key } }
                 .filterValues { it.isNotEmpty() }
 
+            // Find shortest alternating paths.
             val minDistances = goodDiagonals.map { it to Integer.MAX_VALUE }.toMap().toMutableMap()
             var traverseUnmatched: (Edge, Int) -> Unit = fun(_: Edge, _: Int) {}
             fun traverseMatched(e: Edge, depth: Int) {
@@ -205,6 +221,7 @@ fun main(args: Array<String>) {
             unmatchedDiagonals.forEach { traverseUnmatched(it, 0) }
             val selectedPartitions = minDistances.filterValues { it % 2 == 0 }.keys
 
+            // Verify.
             val numMatchings = maximumMatching.size
             val numDiagonals = horizontalDiagonals.size + verticalDiagonals.size
             val expectedMaximumIntersectionSetSize = numDiagonals - numMatchings
@@ -216,6 +233,7 @@ fun main(args: Array<String>) {
                     .forEach { e1 -> assert(!intersectPerpendicularEdges(e0.a, e0.b, e1.a, e1.b)) }
             }
 
+            // Need to correctly update allEdges set when inserting edges for future intersection tests.
             fun removeVertex(v: Vertex) {
                 v.remove()
                 allEdges.remove(v.edgeIn)
@@ -262,7 +280,6 @@ fun main(args: Array<String>) {
                     .filter { it.isCollinear() }.forEach { removeVertex(it) }
             }
 
-            // Find all bad vertices.
             val badVertices = concaveVertices.filter { v ->
                 selectedPartitions.none { v.position == it.a || v.position == it.b }
             }
@@ -302,7 +319,7 @@ fun main(args: Array<String>) {
                     .filter { it.isCollinear() }.forEach { removeVertex(it) }
             }
 
-            // Separate rectangles.
+            // Separate rectangles, it's all we can have left at this point.
             val rectangleByEdge = mutableMapOf<DirectedEdge, List<Vertex>>()
             allEdges.forEach { edge ->
                 val rectangle = mutableListOf<Vertex>()
@@ -317,38 +334,51 @@ fun main(args: Array<String>) {
             val rectangles = rectangleByEdge.values.distinct()
             assert(rectangles.all { it.size == 4 })
 
+            // Move back to 3D space.
             rectangles.map { rectangle ->
                 val faceNormal = faceGroup[0].direction
                 val z = faceGroup[0].projectedPosition.z
 
-                val corners = rectangle.map { faceNormal.unprojectVertexToMinecraftSpace(Int3(it.position, z)) }
-                val minCorner = corners.fold(corners[0]) { acc, vertex -> min(acc, vertex) }
-                val maxCorner = corners.fold(corners[0]) { acc, vertex -> max(acc, vertex) }
+                val corners = rectangle.map { Int3(it.position, z) }
+                    .map { Pair(it, faceNormal.unprojectVertexToMinecraftSpace(it)) }
+                val (minProjectedCorner, minCorner) = corners.minByOrNull { it.second }!!
+                val (maxProjectedCorner, maxCorner) = corners.maxByOrNull { it.second }!!
 
-                BlockFace(minCorner, maxCorner, faceNormal.fromVoxToMinecraftSpace())
+                BlockFace(
+                    minCorner, maxCorner,
+                    minProjectedCorner, maxProjectedCorner,
+                    faceNormal.fromVoxToMinecraftSpace()
+                )
             }
         }
 
-        println(" done. Got %d quads.".format(blockFaces.size))
+        logln(" done. Got %d quads.".format(blockFaces.size))
 
-        print("Saving textures and UVs...")
+        log("Saving textures and UVs...")
 
+        // for each block face, check if block face is occluded.
+        // all non-occluded blockfaces get stored at their position (no custom uvs) into the main texture for the
+        // the side they are facing
+        // all occluded blockfaces will be placed into a custom atlas texture, packed in order of occurrence
         // TODO
 
-        println(" done. Got %d primary and %d UV mapped texture(s).")
+        logln(" done.")
 
-        print("Grouping faces by side...")
+        log("Computing face culling...")
 
+        // for each face, find block faces directly attached to face, tag for side
+        // for all faces internal to these faces (holes) continue walking edges to connected faces and propagate tag,
+        // unless adjacent face is block hull face from first phase
+        // for all faces with exactly one tag, set cullface
         // TODO
 
-        println(" done. Got %d element(s).")
+        logln(" done..")
 
-        print("Saving block model...")
+        log("Saving block model...")
 
+        // generate mc json, one element per block face
         // TODO
 
-        println(" done.")
+        logln(" done.")
     }
 }
-
-data class BlockFace(val from: Int3, val to: Int3, val normal: Direction)
