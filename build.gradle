@@ -1,0 +1,21 @@
+plugins {
+    id 'org.jetbrains.kotlin.jvm' version '1.4.10'
+    id 'application'
+}
+group = 'li.cil.minecraft'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation "com.google.guava:guava:30.0-jre"
+}
+
+compileKotlin {
+    kotlinOptions.jvmTarget = '13'
+}
+application {
+    mainClassName = 'MainKt'
+}
