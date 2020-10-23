@@ -447,20 +447,20 @@ fun main(args: Array<String>) {
         val textureAssetsPath = "$assetsPath/textures/blocks/$baseName"
         Files.createDirectories(Paths.get(textureAssetsPath))
 
-        val prefix = (modid?.plus(":") ?: "") + "textures/blocks/$baseName";
+        val prefix = (modid?.plus(":") ?: "") + "blocks/$baseName";
         if (topFaces.isNotEmpty()) {
             sideTextures.forEach { (direction, image) ->
                 val internalName = direction.getFaceName()
                 val name = "${baseName}_$internalName"
                 ImageIO.write(image, "png", File("$textureAssetsPath/$name.png"))
-                texturesByName[internalName] = prefix + name
+                texturesByName[internalName] = "$prefix/$name"
             }
         }
         if (occludedFaces.isNotEmpty()) {
             val internalName = "atlas"
             val name = "${baseName}_${internalName}"
             ImageIO.write(atlasTexture, "png", File("$textureAssetsPath/$name.png"))
-            texturesByName[internalName] = prefix + name
+            texturesByName[internalName] = "$prefix/$name"
         }
 
         logln(" done.")
