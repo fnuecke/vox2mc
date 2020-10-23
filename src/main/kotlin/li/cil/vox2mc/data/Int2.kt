@@ -1,10 +1,16 @@
 package li.cil.vox2mc.data
 
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sign
 
 data class Int2(val x: Int, val y: Int) {
+    companion object {
+        val ZERO = Int2(0, 0)
+        val ONE = Int2(1, 1)
+    }
+
     fun sqDistanceTo(v: Int2) = dot(v - this, v - this)
     fun leftHandNormal() = Int2(-y, x)
     fun rightHandNormal() = Int2(y, -x)
@@ -19,6 +25,7 @@ data class Int2(val x: Int, val y: Int) {
 fun dot(a: Int2, b: Int2) = a.x * b.x + a.y * b.y
 fun cross(a: Int2, b: Int2) = a.x * b.y - a.y * b.x
 
+fun abs(a: Int2) = Int2(abs(a.x), abs(a.y))
 fun min(a: Int2, b: Int2) = Int2(min(a.x, b.x), min(a.y, b.y))
 fun max(a: Int2, b: Int2) = Int2(max(a.x, b.x), max(a.y, b.y))
 

@@ -3,6 +3,11 @@ package li.cil.vox2mc.data
 data class Int3(val x: Int, val y: Int, val z: Int) : Comparable<Int3> {
     constructor(xy: Int2, z: Int) : this(xy.x, xy.y, z)
 
+    companion object {
+        val ZERO = Int3(0, 0, 0)
+        val ONE = Int3(1, 1, 1)
+    }
+
     operator fun plus(v: Int3) = Int3(x + v.x, y + v.y, z + v.z)
     operator fun minus(v: Int3) = Int3(x - v.x, y - v.y, z - v.z)
     operator fun div(i: Int) = Int3(x / i, y / i, z / i)

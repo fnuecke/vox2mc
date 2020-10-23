@@ -14,5 +14,5 @@ data class VoxelFace(val voxel: Voxel, val direction: Direction) {
     )
 
     fun min() = projectedPosition.toInt2()
-    fun max() = projectedPosition.toInt2() + Int2(1, 1)
+    fun max() = projectedPosition.toInt2() + Int2.ONE
 }
