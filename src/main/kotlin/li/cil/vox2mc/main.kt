@@ -436,7 +436,7 @@ fun main(args: Array<String>) {
             it to BufferedImage(MODEL_RESOLUTION, MODEL_RESOLUTION, BufferedImage.TYPE_INT_RGB)
         }.toMap()
 
-        fun copyFaceColors(face: BlockFace, texture: BufferedImage) {
+        fun copyFaceColors(face: BlockFace, texture: BufferedImage, flipY: Boolean) {
             val (u0, v0) = face.uv0()
             val x0 = (u0 * texture.width).roundToInt()
             val y0 = (v0 * texture.width).roundToInt()
@@ -451,14 +451,14 @@ fun main(args: Array<String>) {
                     val voxel = voxels.getValue(voxelCoordinate)
                     val color = palette[voxel.colorIndex]
                     val pixelX = x0 + x
-                    val pixelY = texture.height - 1 - (y0 + y) // uv go right up, image goes right down.
+                    val pixelY = if (flipY) texture.height - 1 - (y0 + y) else (y0 + y)
                     texture.setRGB(pixelX, pixelY, abgr2rgb(color))
                 }
             }
         }
 
-        topFaces.forEach { copyFaceColors(it, textureBySide.getValue(it.normal)) }
-        atlases.forEach { atlas -> atlas.faces().forEach { copyFaceColors(it, textureByAtlas.getValue(atlas)) } }
+        topFaces.forEach { copyFaceColors(it, textureBySide.getValue(it.normal), true) }
+        atlases.forEach { atlas -> atlas.faces().forEach { copyFaceColors(it, textureByAtlas.getValue(atlas), false) } }
 
         val texturesByName = mutableMapOf<String, String>()
         val baseName = file.nameWithoutExtension
@@ -510,7 +510,7 @@ fun main(args: Array<String>) {
     }
 }
 
-class TextureAtlas(val size: Int2) {
+class TextureAtlas(private val size: Int2) {
     constructor(size: Int) : this(Int2(size, size))
 
     private var data: Data? = null
