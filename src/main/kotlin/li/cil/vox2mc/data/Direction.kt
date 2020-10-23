@@ -15,8 +15,8 @@ enum class Direction {
         LEFT -> "west"
         UP -> "up"
         DOWN -> "down"
-        BACK -> "south"
-        FRONT -> "north"
+        BACK -> "north"
+        FRONT -> "south"
     }
 
     fun normalInVoxSpace() = when (this) {
@@ -55,8 +55,7 @@ enum class Direction {
         FRONT -> v
     }
 
-    // project from x = right, y = back, z = up to x = right, y = up, z = back,
-    // with z = front equal this direction
+    // project from x = right, y = back, z = up to x = right, y = up, z = depth.
     fun projectFaceIndexFromVoxSpace(position: Int3): Int3 {
         fun invert(i: Int) = MODEL_RESOLUTION - 1 - i
         return when (this) {
@@ -81,17 +80,16 @@ enum class Direction {
         }
     }
 
-    // unproject from x = right, y = up to x = right, y = up, z = back, with
-    // z = front equal this direction, to x = right, y = up, z = back.
+    // unproject from x = right, y = up, z = depth to x = left, y = up, z = front.
     fun unprojectVertexToMinecraftSpace(position: Int3): Int3 {
         fun invert(i: Int) = MODEL_RESOLUTION - i
         return when (this) {
-            RIGHT -> Int3(invert(position.z), position.y, position.x)
-            LEFT -> Int3(position.z, position.y, invert(position.x))
-            UP -> Int3(position.x, invert(position.z), position.y)
-            DOWN -> Int3(position.x, position.z, invert(position.y))
-            BACK -> Int3(invert(position.x), position.y, invert(position.z))
-            FRONT -> Int3(position.x, position.y, position.z)
+            RIGHT -> Int3(invert(position.z), position.y, invert(position.x))
+            LEFT -> Int3(position.z, position.y, position.x)
+            UP -> Int3(position.x, invert(position.z), invert(position.y))
+            DOWN -> Int3(position.x, position.z, position.y)
+            BACK -> Int3(invert(position.x), position.y, position.z)
+            FRONT -> Int3(position.x, position.y, invert(position.z))
         }
     }
 }
