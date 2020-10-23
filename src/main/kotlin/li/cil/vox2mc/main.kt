@@ -406,13 +406,35 @@ fun main(args: Array<String>) {
         fun isOccluded(f: BlockFace) = facesByNormal[f.normal].orEmpty().any { it.occludes(f) }
         val (occludedFaces, topFaces) = blockFaces.partition { isOccluded(it) }
 
-        val atlas = TextureAtlas(16)
-        occludedFaces.forEach { atlas.add(it) } // TODO Grow atlas if necessary.
-        atlas.applyUVs()
+        val atlases = mutableListOf<TextureAtlas>()
+//        val wideFaces = occludedFaces.filter { it.size().x > it.size().y }.sortedBy { -it.size().x }
+//        val highFaces = occludedFaces.filter { it.size().x < it.size().y }.sortedBy { -it.size().y }
+//        val otherFaces = occludedFaces - wideFaces - highFaces
+//        wideFaces.forEach { atlas.add(it) }
+//        highFaces.forEach { atlas.add(it) }
+//        otherFaces.forEach { atlas.add(it) }
+        occludedFaces.forEach { face ->
+            if (!atlases.any { it.add(face) }) {
+                val atlas = TextureAtlas(MODEL_RESOLUTION)
+                require(atlas.add(face))
+                atlases.add(atlas)
+            }
+        }
+        atlases.forEach { it.applyUVs() }
 
-        val sideTextures = topFaces.map { it.normal }.distinct()
-            .map { it to BufferedImage(MODEL_RESOLUTION, MODEL_RESOLUTION, BufferedImage.TYPE_INT_RGB) }.toMap()
-        val atlasTexture = BufferedImage(atlas.size.x, atlas.size.y, BufferedImage.TYPE_INT_RGB)
+        val atlasTextureNames = atlases.mapIndexed { index, atlas ->
+            atlas to "atlas$index"
+        }.toMap()
+
+        topFaces.forEach { face -> face.texture = face.normal.getFaceName() }
+        atlases.forEach { atlas -> atlas.faces().forEach { it.texture = atlasTextureNames.getValue(atlas) } }
+
+        val textureBySide = topFaces.map { it.normal }.distinct().map {
+            it to BufferedImage(MODEL_RESOLUTION, MODEL_RESOLUTION, BufferedImage.TYPE_INT_RGB)
+        }.toMap()
+        val textureByAtlas = atlases.map {
+            it to BufferedImage(MODEL_RESOLUTION, MODEL_RESOLUTION, BufferedImage.TYPE_INT_RGB)
+        }.toMap()
 
         fun copyFaceColors(face: BlockFace, texture: BufferedImage) {
             val (u0, v0) = face.uv0()
@@ -435,8 +457,8 @@ fun main(args: Array<String>) {
             }
         }
 
-        topFaces.forEach { copyFaceColors(it, sideTextures.getValue(it.normal)) }
-        occludedFaces.forEach { copyFaceColors(it, atlasTexture) }
+        topFaces.forEach { copyFaceColors(it, textureBySide.getValue(it.normal)) }
+        atlases.forEach { atlas -> atlas.faces().forEach { copyFaceColors(it, textureByAtlas.getValue(atlas)) } }
 
         val texturesByName = mutableMapOf<String, String>()
         val baseName = file.nameWithoutExtension
@@ -447,19 +469,19 @@ fun main(args: Array<String>) {
         val textureAssetsPath = "$assetsPath/textures/blocks/$baseName"
         Files.createDirectories(Paths.get(textureAssetsPath))
 
-        val prefix = (modid?.plus(":") ?: "") + "blocks/$baseName";
-        if (topFaces.isNotEmpty()) {
-            sideTextures.forEach { (direction, image) ->
-                val internalName = direction.getFaceName()
-                val name = "${baseName}_$internalName"
-                ImageIO.write(image, "png", File("$textureAssetsPath/$name.png"))
-                texturesByName[internalName] = "$prefix/$name"
-            }
+        val prefix = (modid?.plus(":") ?: "") + "blocks/$baseName"
+        textureBySide.forEach { (direction, image) ->
+            val internalName = direction.getFaceName()
+            val name = "${baseName}_$internalName"
+            ImageIO.write(image, "png", File("$textureAssetsPath/$name.png"))
+            texturesByName[internalName] = "$prefix/$name"
         }
-        if (occludedFaces.isNotEmpty()) {
-            val internalName = "atlas"
+
+        atlases.forEach { atlas ->
+            val image = textureByAtlas.getValue(atlas)
+            val internalName = atlasTextureNames.getValue(atlas)
             val name = "${baseName}_${internalName}"
-            ImageIO.write(atlasTexture, "png", File("$textureAssetsPath/$name.png"))
+            ImageIO.write(image, "png", File("$textureAssetsPath/$name.png"))
             texturesByName[internalName] = "$prefix/$name"
         }
 
@@ -493,10 +515,24 @@ class TextureAtlas(val size: Int2) {
 
     private var data: Data? = null
 
+    fun faces(): Sequence<BlockFace> = data?.let {
+        return (it.child0?.faces() ?: emptySequence()) +
+                (it.child1?.faces() ?: emptySequence()) +
+                it.face
+    } ?: emptySequence()
+
     fun add(face: BlockFace): Boolean {
+        if (face.size().x > size.x || face.size().y > size.y) {
+            return false
+        }
         data?.let { data ->
-            data.child0?.let { if (it.add(face)) return true }
-            data.child1?.let { if (it.add(face)) return true }
+            if (face.size().y >= face.size().y) {
+                data.child0?.let { if (it.add(face)) return true }
+                data.child1?.let { if (it.add(face)) return true }
+            } else {
+                data.child1?.let { if (it.add(face)) return true }
+                data.child0?.let { if (it.add(face)) return true }
+            }
             return false
         }
 

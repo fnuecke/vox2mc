@@ -1,9 +1,12 @@
 package li.cil.vox2mc.data
 
+import kotlin.math.roundToInt
+
 class BlockFace(
     val from: Int3, val to: Int3,
     val projectedFrom: Int3, val projectedTo: Int3,
     val normal: Direction,
+    var texture: String? = null,
     var cullFace: Direction? = null,
     var uvs: Array<Float>? = null
 ) {
@@ -38,7 +41,9 @@ class BlockFace(
         from.toArray(), to.toArray(),
         mapOf(
             normal.getFaceName() to BlockModel.Face(
-                if (uvs != null) "atlas" else normal.getFaceName()
+                texture,
+                cullface = null,
+                uvs?.map { (it * 16).roundToInt() }?.toTypedArray()
             )
         )
     )
