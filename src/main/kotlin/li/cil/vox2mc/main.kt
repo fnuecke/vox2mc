@@ -1,15 +1,19 @@
 package li.cil.vox2mc
 
 import com.google.gson.Gson
+import li.cil.vox2mc.algorithm.abgr2rgb
 import li.cil.vox2mc.algorithm.hopcroftKarp
 import li.cil.vox2mc.algorithm.intersectPerpendicularEdges
 import li.cil.vox2mc.algorithm.intersectRayEdge
 import li.cil.vox2mc.data.*
 import li.cil.vox2mc.vox.*
+import java.awt.image.BufferedImage
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Paths
+import javax.imageio.ImageIO
+import kotlin.math.roundToInt
 
 fun main(args: Array<String>) {
     if (args.isEmpty()) {
@@ -17,28 +21,42 @@ fun main(args: Array<String>) {
         return
     }
 
-    val quiet = args.any { it == "-q" || it == "--quiet" }
+    val flags = mutableMapOf<String, Boolean>()
+    val options = mutableMapOf<String, String>()
+    val (files, _) = args.partition { arg ->
+        if (arg == "-q" || arg == "--quiet") {
+            flags["quiet"] = true
+            false
+        } else if (arg.startsWith("-m=") || arg.startsWith("--modid=")) {
+            options["modid"] = arg.split('=', limit = 2)[1]
+            false
+        } else if (arg.startsWith("-o=") || arg.startsWith("--output")) {
+            options["output"] = arg.split('=', limit = 2)[1]
+            false
+        } else {
+            true
+        }
+    }
+
+    fun getFlag(name: String) = flags.getOrDefault(name, false)
+    fun getOption(name: String) = options[name]
 
     fun log(msg: String) {
-        if (!quiet) print(msg)
+        if (!getFlag("quiet")) print(msg)
     }
 
     fun logln(msg: String) {
-        if (!quiet) println(msg)
+        if (!getFlag("quiet")) println(msg)
     }
 
-    for (arg in args) {
-        if (arg == "-q" || arg == "--quiet") {
-            continue
-        }
-
-        val file = File(arg)
+    for (filename in files) {
+        val file = File(filename)
         if (!file.exists()) {
-            logln("File [%s] not found, skipping.".format(arg))
+            logln("File [%s] not found, skipping.".format(filename))
             continue
         }
 
-        log("Loading file [%s]...".format(arg))
+        log("Loading file [%s]...".format(filename))
 
         val vox = VoxLoader.loadVox(file)
 
@@ -73,7 +91,7 @@ fun main(args: Array<String>) {
 
         val allFaces = voxels.values.flatMap { voxel ->
             Direction.values().filterNot {
-                voxels.containsKey(voxel.position + it.normal)
+                voxels.containsKey(voxel.position + it.normalInVoxSpace())
             }.map { VoxelFace(voxel, it) }
         }
 
@@ -193,7 +211,10 @@ fun main(args: Array<String>) {
             val verticalDiagonals = goodDiagonals.filter { it.a.x == it.b.x }.toSet()
             val allIntersections = horizontalDiagonals.flatMap { u ->
                 verticalDiagonals.flatMap { v ->
-                    if (intersectPerpendicularEdges(u.a, u.b, v.a, v.b)) sequenceOf(u to v, v to u) else emptySequence()
+                    if (intersectPerpendicularEdges(u.a, u.b, v.a, v.b))
+                        sequenceOf(u to v, v to u)
+                    else
+                        emptySequence()
                 }
             }.groupBy { it.first }.mapValues { e -> e.value.map { it.second }.toSet() }
 
@@ -237,10 +258,11 @@ fun main(args: Array<String>) {
             assert(selectedPartitions.size == expectedMaximumIntersectionSetSize)
 
             // Assert diagonals from selected partitions do not intersect.
-            selectedPartitions.forEachIndexed { index, e0 ->
-                selectedPartitions.drop(index + 1)
-                    .forEach { e1 -> assert(!intersectPerpendicularEdges(e0.a, e0.b, e1.a, e1.b)) }
-            }
+            assert(selectedPartitions.mapIndexed { index, e0 ->
+                selectedPartitions.drop(index + 1).any { e1 ->
+                    intersectPerpendicularEdges(e0.a, e0.b, e1.a, e1.b)
+                }
+            }.count { it } == 0)
 
             // Need to correctly update allEdges set when inserting edges for future intersection tests.
             fun removeVertex(v: Vertex) {
@@ -348,15 +370,18 @@ fun main(args: Array<String>) {
                 val faceNormal = faceGroup[0].direction
                 val z = faceGroup[0].projectedPosition.z
 
-                val corners = rectangle.map { Int3(it.position, z) }
-                    .map { Pair(it, faceNormal.unprojectVertexToMinecraftSpace(it)) }
-                val (minProjectedCorner, minCorner) = corners.minByOrNull { it.second }!!
-                val (maxProjectedCorner, maxCorner) = corners.maxByOrNull { it.second }!!
+                val projectedCorners = rectangle.map { Int3(it.position, z) }
+                val corners = projectedCorners.map { faceNormal.unprojectVertexToMinecraftSpace(it) }
+
+                val minProjectedCorner = projectedCorners.fold(projectedCorners[0]) { acc, pos -> min(acc, pos) }
+                val maxProjectedCorner = projectedCorners.fold(projectedCorners[0]) { acc, pos -> max(acc, pos) }
+                val minCorner = corners.fold(corners[0]) { acc, pos -> min(acc, pos) }
+                val maxCorner = corners.fold(corners[0]) { acc, pos -> max(acc, pos) }
 
                 BlockFace(
                     minCorner, maxCorner,
                     minProjectedCorner, maxProjectedCorner,
-                    faceNormal.fromVoxToMinecraftSpace()
+                    faceNormal
                 )
             }
         }
@@ -365,11 +390,78 @@ fun main(args: Array<String>) {
 
         log("Saving textures and UVs...")
 
-        // for each block face, check if block face is occluded.
-        // all non-occluded blockfaces get stored at their position (no custom uvs) into the main texture for the
-        // the side they are facing
-        // all occluded blockfaces will be placed into a custom atlas texture, packed in order of occurrence
-        // TODO
+        // Collect block face adjacency info.
+        val blockFaceAdjacency = mutableMapOf<BlockFace, MutableSet<BlockFace>>()
+        blockFaces.forEachIndexed { index, face0 ->
+            blockFaces.drop(index + 1).forEach { face1 ->
+                if (face0.isAdjacentTo(face1)) {
+                    blockFaceAdjacency.computeIfAbsent(face0) { mutableSetOf() }.add(face1)
+                    blockFaceAdjacency.computeIfAbsent(face1) { mutableSetOf() }.add(face0)
+                }
+            }
+        }
+
+        // Partition block faces by whether they're occluded or not.
+        val facesByNormal = blockFaces.groupBy { it.normal }
+        fun isOccluded(f: BlockFace) = facesByNormal[f.normal].orEmpty().any { it.occludes(f) }
+        val (occludedFaces, topFaces) = blockFaces.partition { isOccluded(it) }
+
+        val atlas = TextureAtlas(16)
+        occludedFaces.forEach { atlas.add(it) } // TODO Grow atlas if necessary.
+        atlas.applyUVs()
+
+        val sideTextures = topFaces.map { it.normal }.distinct()
+            .map { it to BufferedImage(MODEL_RESOLUTION, MODEL_RESOLUTION, BufferedImage.TYPE_INT_RGB) }.toMap()
+        val atlasTexture = BufferedImage(atlas.size.x, atlas.size.y, BufferedImage.TYPE_INT_RGB)
+
+        fun copyFaceColors(face: BlockFace, texture: BufferedImage) {
+            val (u0, v0) = face.uv0()
+            val x0 = (u0 * texture.width).roundToInt()
+            val y0 = (v0 * texture.width).roundToInt()
+            val size = face.size()
+            val origin = face.normal.unprojectVertexToVoxSpace(face.projectedFrom)
+            val right = face.normal.rightInVoxSpace()
+            val up = face.normal.upInVoxSpace()
+            for (x in 0 until size.x) {
+                for (y in 0 until size.y) {
+                    val facePosition = origin + right * x + up * y
+                    val voxelCoordinate = face.normal.faceToVoxelCoordinate(facePosition)
+                    val voxel = voxels.getValue(voxelCoordinate)
+                    val color = palette[voxel.colorIndex]
+                    val pixelX = x0 + x
+                    val pixelY = texture.height - 1 - (y0 + y) // uv go right up, image goes right down.
+                    texture.setRGB(pixelX, pixelY, abgr2rgb(color))
+                }
+            }
+        }
+
+        topFaces.forEach { copyFaceColors(it, sideTextures.getValue(it.normal)) }
+        occludedFaces.forEach { copyFaceColors(it, atlasTexture) }
+
+        val texturesByName = mutableMapOf<String, String>()
+        val baseName = file.nameWithoutExtension
+        val modid = getOption("modid")
+
+        val basePath = getOption("output") ?: "assets"
+        val assetsPath = basePath + (modid?.let { "/$it" } ?: "")
+        val textureAssetsPath = "$assetsPath/textures/blocks/$baseName"
+        Files.createDirectories(Paths.get(textureAssetsPath))
+
+        val prefix = (modid?.plus(":") ?: "") + "textures/blocks/$baseName";
+        if (topFaces.isNotEmpty()) {
+            sideTextures.forEach { (direction, image) ->
+                val internalName = direction.getFaceName()
+                val name = "${baseName}_$internalName"
+                ImageIO.write(image, "png", File("$textureAssetsPath/$name.png"))
+                texturesByName[internalName] = prefix + name
+            }
+        }
+        if (occludedFaces.isNotEmpty()) {
+            val internalName = "atlas"
+            val name = "${baseName}_${internalName}"
+            ImageIO.write(atlasTexture, "png", File("$textureAssetsPath/$name.png"))
+            texturesByName[internalName] = prefix + name
+        }
 
         logln(" done.")
 
@@ -381,13 +473,61 @@ fun main(args: Array<String>) {
         // for all faces with exactly one tag, set cullface
         // TODO
 
-        logln(" done..")
+        logln(" done.")
 
         log("Saving block model...")
 
-        val blockModel = BlockModel(mapOf("all" to "computer.png"), blockFaces.map { it.toElement() }.toTypedArray())
-        Files.writeString(Paths.get("model.json"), Gson().toJson(blockModel), StandardCharsets.UTF_8)
+        val blockModelsAssetPath = "$assetsPath/models/block/"
+        Files.createDirectories(Paths.get(blockModelsAssetPath))
+
+        val blockModel = BlockModel(texturesByName, blockFaces.map { it.toElement() }.toTypedArray())
+        val blockModelPath = Paths.get(blockModelsAssetPath, "$baseName.json")
+        Files.writeString(blockModelPath, Gson().toJson(blockModel), StandardCharsets.UTF_8)
 
         logln(" done.")
     }
+}
+
+class TextureAtlas(val size: Int2) {
+    constructor(size: Int) : this(Int2(size, size))
+
+    private var data: Data? = null
+
+    fun add(face: BlockFace): Boolean {
+        data?.let { data ->
+            data.child0?.let { if (it.add(face)) return true }
+            data.child1?.let { if (it.add(face)) return true }
+            return false
+        }
+
+        val faceSize = face.size()
+        if (faceSize.x > size.x || faceSize.y > size.y) {
+            return false
+        }
+
+        val sizeChild0 = Int2(size.x - faceSize.x, faceSize.y)
+        val child0 = if (sizeChild0 != Int2.ZERO) TextureAtlas(sizeChild0) else null
+        val sizeChild1 = Int2(size.x, size.y - faceSize.y)
+        val child1 = if (sizeChild1 != Int2.ZERO) TextureAtlas(sizeChild1) else null
+        data = Data(face, child0, child1)
+        return true
+    }
+
+    fun applyUVs() {
+        applyUVs(0, 0, size.x.toFloat(), size.y.toFloat())
+    }
+
+    private fun applyUVs(u0: Int, v0: Int, sizeU: Float, sizeV: Float) {
+        data?.let { data ->
+            val faceSize = data.face.size()
+            data.face.uvs = arrayOf(
+                u0 / sizeU, v0 / sizeV,
+                (u0 + faceSize.x) / sizeU, (v0 + faceSize.y) / sizeV
+            )
+            data.child0?.applyUVs(u0 + faceSize.x, v0, sizeU, sizeV)
+            data.child1?.applyUVs(u0, v0 + faceSize.y, sizeU, sizeV)
+        }
+    }
+
+    private data class Data(val face: BlockFace, val child0: TextureAtlas?, val child1: TextureAtlas?)
 }
