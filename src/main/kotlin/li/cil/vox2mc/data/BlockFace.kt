@@ -40,7 +40,7 @@ class BlockFace(
         mapOf(
             normal.getFaceName() to BlockModel.Face(
                 texture ?: normal.getFaceName(),
-                cullface = cullFace?.getFaceName(),
+                cullFace?.getFaceName(),
                 uvs?.map { (it * 16).roundToInt() }?.toTypedArray()
             )
         )
@@ -57,7 +57,7 @@ class BlockFace(
         )
     }
 
-    fun areEdgesTouching(e0: Pair<Int3, Int3>, e1: Pair<Int3, Int3>): Boolean {
+    private fun areEdgesTouching(e0: Pair<Int3, Int3>, e1: Pair<Int3, Int3>): Boolean {
         val (a0, a1) = e0
         val (b0, b1) = e1
         val dir0 = a1 - a0
