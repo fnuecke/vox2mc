@@ -1,10 +1,7 @@
 package li.cil.vox2mc
 
 import com.google.gson.Gson
-import li.cil.vox2mc.algorithm.abgr2rgb
-import li.cil.vox2mc.algorithm.hopcroftKarp
-import li.cil.vox2mc.algorithm.intersectPerpendicularEdges
-import li.cil.vox2mc.algorithm.intersectRayEdge
+import li.cil.vox2mc.algorithm.*
 import li.cil.vox2mc.data.*
 import li.cil.vox2mc.vox.*
 import java.awt.image.BufferedImage
@@ -14,7 +11,9 @@ import java.nio.file.Files
 import java.nio.file.Paths
 import javax.imageio.ImageIO
 import kotlin.math.max
+import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.random.Random
 
 fun main(args: Array<String>) {
     if (args.isEmpty()) {
@@ -22,31 +21,37 @@ fun main(args: Array<String>) {
         return
     }
 
-    val flags = mutableMapOf<String, Boolean>()
-    val options = mutableMapOf<String, String>()
+    var quiet = false
+    var modid: String? = null
+    var output = "assets"
+    var noisePower: Float? = null
+
     val (files, _) = args.partition { arg ->
         if (arg == "-q" || arg == "--quiet") {
-            flags["quiet"] = true
+            quiet = true
             false
         } else if (arg.startsWith("-m=") || arg.startsWith("--modid=")) {
-            options["modid"] = arg.split('=', limit = 2)[1]
+            modid = arg.split('=', limit = 2)[1]
             false
-        } else if (arg.startsWith("-o=") || arg.startsWith("--output")) {
-            options["output"] = arg.split('=', limit = 2)[1]
+        } else if (arg.startsWith("-o=") || arg.startsWith("--output=")) {
+            output = arg.split('=', limit = 2)[1]
+            false
+        } else if (arg.startsWith("-n=") || arg.startsWith("--noise=")) {
+            // We actually only go up to 20% noise scale; anything more is silly, and the control
+            // in the lower end is very helpful.
+            noisePower = arg.split('=', limit = 2)[1].toInt().coerceIn(0..100) / 500f
             false
         } else {
             true
         }
     }
 
-    fun getFlag(name: String) = flags.getOrDefault(name, false)
-
     fun log(msg: String) {
-        if (!getFlag("quiet")) print(msg)
+        if (!quiet) print(msg)
     }
 
     fun logln(msg: String) {
-        if (!getFlag("quiet")) println(msg)
+        if (!quiet) println(msg)
     }
 
     for (filename in files) {
@@ -89,7 +94,7 @@ fun main(args: Array<String>) {
         log("Generating UVs and saving textures...")
 
         val baseName = file.nameWithoutExtension
-        val assetsPath = getAssetsPath(options)
+        val assetsPath = output + (modid?.let { "/$it" } ?: "")
         val (occludedFaces, topFaces) = blockFaces.let { faces ->
             val facesByNormal = blockFaces.groupBy { it.normal }
             fun isOccluded(f: BlockFace) = facesByNormal[f.normal].orEmpty().any { it.occludes(f) }
@@ -100,7 +105,12 @@ fun main(args: Array<String>) {
 
         val (textureBySide, textureByAtlas) = generateTextures(voxels, getPalette(vox), topFaces, atlases)
 
-        val texturesByName = saveTextures(baseName, assetsPath, options, textureBySide, textureByAtlas)
+        val rng = Random(0xdeadbeef)
+        noisePower?.let { noise ->
+            (textureBySide.values + textureByAtlas.values).forEach { applyNoise(it, noise, rng) }
+        }
+
+        val texturesByName = saveTextures(baseName, assetsPath, modid, textureBySide, textureByAtlas)
 
         logln(" done.")
 
@@ -536,21 +546,37 @@ private fun generateTextures(
     return Pair(textureBySide, textureByAtlas)
 }
 
-private fun getAssetsPath(options: Map<String, String>): String {
-    val modid = options["modid"]
-    val basePath = options["output"] ?: "assets"
-    return basePath + (modid?.let { "/$it" } ?: "")
+// Applies uniform monochromatic noise in linear color space.
+fun applyNoise(image: BufferedImage, noiseStrength: Float, rng: Random) {
+    for (x in 0 until image.width) {
+        for (y in 0 until image.height) {
+            val (r, g, b) = image.getRGB(x, y).toRGBInt3()
+            val gamma = 2.2f // good enough for our purposes
+            val rLinear = (r / 255f).pow(1f / gamma)
+            val gLinear = (g / 255f).pow(1f / gamma)
+            val bLinear = (b / 255f).pow(1f / gamma)
+
+            val noise = (rng.nextFloat() - 0.5f) * 2f * noiseStrength
+            val rNoise = (rLinear + noise).coerceIn(0f..1f)
+            val gNoise = (gLinear + noise).coerceIn(0f..1f)
+            val bNoise = (bLinear + noise).coerceIn(0f..1f)
+
+            val rGamma = (rNoise.pow(gamma) * 255).roundToInt()
+            val gGamma = (gNoise.pow(gamma) * 255).roundToInt()
+            val bGamma = (bNoise.pow(gamma) * 255).roundToInt()
+            image.setRGB(x, y, Int3(rGamma, gGamma, bGamma).toRGBInt())
+        }
+    }
 }
 
 private fun saveTextures(
     baseName: String,
     assetsPath: String,
-    options: Map<String, String>,
+    modid: String?,
     textureBySide: Map<Direction, BufferedImage>,
     textureByAtlas: Map<TextureAtlas, BufferedImage>
 ): Map<String, String> {
     val texturesByName = mutableMapOf<String, String>()
-    val modid = options["modid"]
 
     val textureAssetsPath = "$assetsPath/textures/blocks/$baseName"
     Files.createDirectories(Paths.get(textureAssetsPath))
