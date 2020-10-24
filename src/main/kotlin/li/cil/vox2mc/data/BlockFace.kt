@@ -12,8 +12,6 @@ class BlockFace(
 ) {
     fun depth() = projectedFrom.z
 
-    fun isHullFace() = depth() == 0
-
     fun uv0() = uvs?.sliceArray(0..1) ?: arrayOf(projectedFrom.x / 16f, projectedFrom.y / 16f)
 
     fun size() = abs((projectedTo - projectedFrom).toInt2())
@@ -42,7 +40,7 @@ class BlockFace(
         mapOf(
             normal.getFaceName() to BlockModel.Face(
                 texture ?: normal.getFaceName(),
-                cullface = null,
+                cullface = cullFace?.getFaceName(),
                 uvs?.map { (it * 16).roundToInt() }?.toTypedArray()
             )
         )
@@ -52,14 +50,14 @@ class BlockFace(
         val diagonal = to - from
         val (a, b) = diagonal.decompose().filter { it != Int3.ZERO }
         return arrayOf(
-            Pair(from, a),
-            Pair(a, to),
-            Pair(to, b),
-            Pair(b, from)
+            Pair(from, from + a),
+            Pair(from + a, to),
+            Pair(to, from + b),
+            Pair(from + b, from)
         )
     }
 
-    private fun areEdgesTouching(e0: Pair<Int3, Int3>, e1: Pair<Int3, Int3>): Boolean {
+    fun areEdgesTouching(e0: Pair<Int3, Int3>, e1: Pair<Int3, Int3>): Boolean {
         val (a0, a1) = e0
         val (b0, b1) = e1
         val dir0 = a1 - a0
@@ -75,11 +73,9 @@ class BlockFace(
 
         // Ensure collinear.
         val a2b = b0 - a0
-        if (a2b.decompose().count { it == Int3(0, 0, 0) } != 2) {
+        if (a2b != Int3.ZERO && (a2b.decompose().count { it == Int3.ZERO } != 2 || dot(dir0, a2b) == 0)) {
             return false
         }
-
-        assert(dot(dir0, a2b) != 0)
 
         // Ensure same orientation.
         val (b0o, b1o) = if (dot(dir0, dir1) < 0) Pair(b1, b0) else Pair(b0, b1)

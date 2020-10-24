@@ -90,25 +90,22 @@ fun main(args: Array<String>) {
 
         val baseName = file.nameWithoutExtension
         val assetsPath = getAssetsPath(options)
-        val texturesByName = run {
-            val (occludedFaces, topFaces) = blockFaces.let { faces ->
-                val facesByNormal = blockFaces.groupBy { it.normal }
-                fun isOccluded(f: BlockFace) = facesByNormal[f.normal].orEmpty().any { it.occludes(f) }
-                faces.partition { isOccluded(it) }
-            }
-
-            val atlases = generateAtlases(occludedFaces)
-
-            val (textureBySide, textureByAtlas) = generateTextures(voxels, getPalette(vox), topFaces, atlases)
-
-            saveTextures(baseName, assetsPath, options, textureBySide, textureByAtlas)
+        val (occludedFaces, topFaces) = blockFaces.let { faces ->
+            val facesByNormal = blockFaces.groupBy { it.normal }
+            fun isOccluded(f: BlockFace) = facesByNormal[f.normal].orEmpty().any { it.occludes(f) }
+            faces.partition { isOccluded(it) }
         }
+
+        val atlases = generateAtlases(occludedFaces)
+
+        val (textureBySide, textureByAtlas) = generateTextures(voxels, getPalette(vox), topFaces, atlases)
+
+        val texturesByName = saveTextures(baseName, assetsPath, options, textureBySide, textureByAtlas)
 
         logln(" done.")
 
         log("Computing face culling...")
 
-        // Collect block face adjacency info.
         val blockFaceAdjacency = mutableMapOf<BlockFace, MutableSet<BlockFace>>()
         blockFaces.forEachIndexed { index, face0 ->
             blockFaces.drop(index + 1).forEach { face1 ->
@@ -119,17 +116,32 @@ fun main(args: Array<String>) {
             }
         }
 
-        // for each face, find block faces directly attached to face, tag for side
-        // for all faces internal to these faces (holes) continue walking edges to connected faces and propagate tag,
-        // unless adjacent face is block hull face from first phase
-        // for all faces with exactly one tag, set cullface
-        // TODO
+        val visibleFrom = topFaces.groupBy { it.normal }.flatMap { (normal, faces) ->
+            var queue = faces.flatMap { blockFaceAdjacency[it].orEmpty() }.filterNot { topFaces.contains(it) }
+            val connectedFaces = mutableSetOf<BlockFace>()
+            while (queue.isNotEmpty()) {
+                queue = queue.flatMap { face ->
+                    if (connectedFaces.add(face)) {
+                        blockFaceAdjacency[face].orEmpty().filterNot { topFaces.contains(it) }
+                    } else {
+                        emptyList()
+                    }
+                }
+            }
+            connectedFaces.map { it to normal }
+        }.groupBy { it.first }.mapValues { entry -> entry.value.map { it.second } }
+
+        topFaces.forEach { it.cullFace = it.normal }
+        visibleFrom.filterValues { it.size == 1 }.mapValues { it.value.single() }.forEach { (face, normal) ->
+            face.cullFace = normal
+        }
 
         logln(" done.")
 
         log("Saving block model...")
 
-        val blockModel = BlockModel(texturesByName, blockFaces.map { it.toElement() }.toTypedArray())
+        val visibleBlockFaces = visibleFrom.keys + topFaces
+        val blockModel = BlockModel(texturesByName, visibleBlockFaces.map { it.toElement() }.toTypedArray())
 
         val blockModelsAssetPath = "$assetsPath/models/block/"
         Files.createDirectories(Paths.get(blockModelsAssetPath))
