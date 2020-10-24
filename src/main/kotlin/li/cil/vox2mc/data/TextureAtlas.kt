@@ -1,7 +1,7 @@
 package li.cil.vox2mc.data
 
-class TextureAtlas(private val size: Int2) {
-    constructor(size: Int) : this(Int2(size, size))
+class TextureAtlas(private val size: Int2, val name: String) {
+    constructor(size: Int, name: String) : this(Int2(size, size), name)
 
     private var data: Data? = null
 
@@ -38,9 +38,9 @@ class TextureAtlas(private val size: Int2) {
         // +---------------+  -
         // |--- size.x ----|
         val sizeChild0 = Int2(size.x - faceSize.x, faceSize.y)
-        val child0 = if (sizeChild0.x != 0) TextureAtlas(sizeChild0) else null
+        val child0 = if (sizeChild0.x != 0) TextureAtlas(sizeChild0, name) else null
         val sizeChild1 = Int2(size.x, size.y - faceSize.y)
-        val child1 = if (sizeChild1.y != 0) TextureAtlas(sizeChild1) else null
+        val child1 = if (sizeChild1.y != 0) TextureAtlas(sizeChild1, name) else null
         data = Data(face, child0, child1)
         return true
     }

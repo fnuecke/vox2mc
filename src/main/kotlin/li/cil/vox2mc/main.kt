@@ -40,7 +40,6 @@ fun main(args: Array<String>) {
     }
 
     fun getFlag(name: String) = flags.getOrDefault(name, false)
-    fun getOption(name: String) = options[name]
 
     fun log(msg: String) {
         if (!getFlag("quiet")) print(msg)
@@ -64,12 +63,6 @@ fun main(args: Array<String>) {
         logln(" done.")
 
         log("Collecting voxels from loaded file...")
-
-        val paletteChunk = vox.children.find { chunk -> chunk.header.id == ChunkHeader.RGBA_CHUNK_ID }
-        val palette = if (paletteChunk != null) {
-            require(paletteChunk.content is PaletteContent)
-            paletteChunk.content.colors
-        } else PaletteContent.DEFAULT_PALETTE
 
         val voxels = getVoxels(vox)
 
@@ -95,6 +88,26 @@ fun main(args: Array<String>) {
 
         log("Generating UVs and saving textures...")
 
+        val baseName = file.nameWithoutExtension
+        val assetsPath = getAssetsPath(options)
+        val texturesByName = run {
+            val (occludedFaces, topFaces) = blockFaces.let { faces ->
+                val facesByNormal = blockFaces.groupBy { it.normal }
+                fun isOccluded(f: BlockFace) = facesByNormal[f.normal].orEmpty().any { it.occludes(f) }
+                faces.partition { isOccluded(it) }
+            }
+
+            val atlases = generateAtlases(occludedFaces)
+
+            val (textureBySide, textureByAtlas) = generateTextures(voxels, getPalette(vox), topFaces, atlases)
+
+            saveTextures(baseName, assetsPath, options, textureBySide, textureByAtlas)
+        }
+
+        logln(" done.")
+
+        log("Computing face culling...")
+
         // Collect block face adjacency info.
         val blockFaceAdjacency = mutableMapOf<BlockFace, MutableSet<BlockFace>>()
         blockFaces.forEachIndexed { index, face0 ->
@@ -106,88 +119,6 @@ fun main(args: Array<String>) {
             }
         }
 
-        // Partition block faces by whether they're occluded or not.
-        val facesByNormal = blockFaces.groupBy { it.normal }
-        fun isOccluded(f: BlockFace) = facesByNormal[f.normal].orEmpty().any { it.occludes(f) }
-        val (occludedFaces, topFaces) = blockFaces.partition { isOccluded(it) }
-
-        val atlases = mutableListOf<TextureAtlas>()
-        occludedFaces.sortedBy { -max(it.size().x, it.size().y) }.forEach { face ->
-            if (!atlases.any { it.add(face) }) {
-                val atlas = TextureAtlas(MODEL_RESOLUTION)
-                require(atlas.add(face))
-                atlases.add(atlas)
-            }
-        }
-        atlases.forEach { it.applyUVs() }
-
-        val atlasTextureNames = atlases.mapIndexed { index, atlas ->
-            atlas to "atlas$index"
-        }.toMap()
-
-        topFaces.forEach { face -> face.texture = face.normal.getFaceName() }
-        atlases.forEach { atlas -> atlas.faces().forEach { it.texture = atlasTextureNames.getValue(atlas) } }
-
-        val textureBySide = topFaces.map { it.normal }.distinct().map {
-            it to BufferedImage(MODEL_RESOLUTION, MODEL_RESOLUTION, BufferedImage.TYPE_INT_RGB)
-        }.toMap()
-        val textureByAtlas = atlases.map {
-            it to BufferedImage(MODEL_RESOLUTION, MODEL_RESOLUTION, BufferedImage.TYPE_INT_RGB)
-        }.toMap()
-
-        fun copyFaceColors(face: BlockFace, texture: BufferedImage, flipY: Boolean) {
-            val (u0, v0) = face.uv0()
-            val x0 = (u0 * texture.width).roundToInt()
-            val y0 = (v0 * texture.width).roundToInt()
-            val size = face.size()
-            val origin = face.normal.unprojectVertexToVoxSpace(face.projectedFrom)
-            val right = face.normal.rightInVoxSpace()
-            val up = face.normal.upInVoxSpace()
-            for (x in 0 until size.x) {
-                for (y in 0 until size.y) {
-                    val facePosition = origin + right * x + up * y
-                    val voxelCoordinate = face.normal.faceToVoxelCoordinate(facePosition)
-                    val voxel = voxels.getValue(voxelCoordinate)
-                    val color = palette[voxel.colorIndex]
-                    val pixelX = x0 + x
-                    val pixelY = if (flipY) texture.height - 1 - (y0 + y) else (y0 + y)
-                    texture.setRGB(pixelX, pixelY, abgr2rgb(color))
-                }
-            }
-        }
-
-        topFaces.forEach { copyFaceColors(it, textureBySide.getValue(it.normal), true) }
-        atlases.forEach { atlas -> atlas.faces().forEach { copyFaceColors(it, textureByAtlas.getValue(atlas), false) } }
-
-        val texturesByName = mutableMapOf<String, String>()
-        val baseName = file.nameWithoutExtension
-        val modid = getOption("modid")
-
-        val basePath = getOption("output") ?: "assets"
-        val assetsPath = basePath + (modid?.let { "/$it" } ?: "")
-        val textureAssetsPath = "$assetsPath/textures/blocks/$baseName"
-        Files.createDirectories(Paths.get(textureAssetsPath))
-
-        val prefix = (modid?.plus(":") ?: "") + "blocks/$baseName"
-        textureBySide.forEach { (direction, image) ->
-            val internalName = direction.getFaceName()
-            val name = "${baseName}_$internalName"
-            ImageIO.write(image, "png", File("$textureAssetsPath/$name.png"))
-            texturesByName[internalName] = "$prefix/$name"
-        }
-
-        atlases.forEach { atlas ->
-            val image = textureByAtlas.getValue(atlas)
-            val internalName = atlasTextureNames.getValue(atlas)
-            val name = "${baseName}_${internalName}"
-            ImageIO.write(image, "png", File("$textureAssetsPath/$name.png"))
-            texturesByName[internalName] = "$prefix/$name"
-        }
-
-        logln(" done.")
-
-        log("Computing face culling...")
-
         // for each face, find block faces directly attached to face, tag for side
         // for all faces internal to these faces (holes) continue walking edges to connected faces and propagate tag,
         // unless adjacent face is block hull face from first phase
@@ -198,10 +129,11 @@ fun main(args: Array<String>) {
 
         log("Saving block model...")
 
+        val blockModel = BlockModel(texturesByName, blockFaces.map { it.toElement() }.toTypedArray())
+
         val blockModelsAssetPath = "$assetsPath/models/block/"
         Files.createDirectories(Paths.get(blockModelsAssetPath))
 
-        val blockModel = BlockModel(texturesByName, blockFaces.map { it.toElement() }.toTypedArray())
         val blockModelPath = Paths.get(blockModelsAssetPath, "$baseName.json")
         Files.writeString(blockModelPath, Gson().toJson(blockModel), StandardCharsets.UTF_8)
 
@@ -225,6 +157,15 @@ private fun getVoxels(vox: Chunk) = vox.children.flatMapIndexed { index, chunk -
         emptyList()
     }
 }.map { v -> v.position to v }.toMap()
+
+// Get color palette for a vox model.
+private fun getPalette(vox: Chunk): Array<Int> {
+    val paletteChunk = vox.children.find { chunk -> chunk.header.id == ChunkHeader.RGBA_CHUNK_ID }
+    return if (paletteChunk != null) {
+        require(paletteChunk.content is PaletteContent)
+        paletteChunk.content.colors
+    } else PaletteContent.DEFAULT_PALETTE
+}
 
 // Get all open voxel faces (i.e. neighbor voxel in the face's direction is not set).
 private fun getFaces(voxels: Map<Int3, Voxel>) = voxels.values.flatMap { voxel ->
@@ -526,3 +467,96 @@ private fun rectanglesToBlockFaces(rectangles: List<List<Vertex>>, faceNormal: D
             faceNormal
         )
     }
+
+private fun generateAtlases(faces: List<BlockFace>): List<TextureAtlas> {
+    val atlases = mutableListOf<TextureAtlas>()
+    faces.sortedBy { -max(it.size().x, it.size().y) }.forEach { face ->
+        if (!atlases.any { it.add(face) }) {
+            val atlas = TextureAtlas(MODEL_RESOLUTION, "atlas" + atlases.size)
+            require(atlas.add(face))
+            atlases.add(atlas)
+        }
+    }
+    atlases.forEach { it.applyUVs() }
+
+    atlases.forEach { atlas -> atlas.faces().forEach { it.texture = atlas.name } }
+
+    return atlases
+}
+
+private fun generateTextures(
+    voxels: Map<Int3, Voxel>,
+    palette: Array<Int>,
+    topFaces: List<BlockFace>,
+    atlases: List<TextureAtlas>
+): Pair<Map<Direction, BufferedImage>, Map<TextureAtlas, BufferedImage>> {
+    val textureBySide = topFaces.map { it.normal }.distinct().map {
+        it to BufferedImage(MODEL_RESOLUTION, MODEL_RESOLUTION, BufferedImage.TYPE_INT_RGB)
+    }.toMap()
+    val textureByAtlas = atlases.map {
+        it to BufferedImage(MODEL_RESOLUTION, MODEL_RESOLUTION, BufferedImage.TYPE_INT_RGB)
+    }.toMap()
+
+    fun copyFaceColors(face: BlockFace, texture: BufferedImage, flipY: Boolean) {
+        val (u0, v0) = face.uv0()
+        val x0 = (u0 * texture.width).roundToInt()
+        val y0 = (v0 * texture.width).roundToInt()
+        val size = face.size()
+        val origin = face.normal.unprojectVertexToVoxSpace(face.projectedFrom)
+        val right = face.normal.rightInVoxSpace()
+        val up = face.normal.upInVoxSpace()
+        for (x in 0 until size.x) {
+            for (y in 0 until size.y) {
+                val facePosition = origin + right * x + up * y
+                val voxelCoordinate = face.normal.faceToVoxelCoordinate(facePosition)
+                val voxel = voxels.getValue(voxelCoordinate)
+                val color = palette[voxel.colorIndex]
+                val pixelX = x0 + x
+                val pixelY = if (flipY) texture.height - 1 - (y0 + y) else (y0 + y)
+                texture.setRGB(pixelX, pixelY, abgr2rgb(color))
+            }
+        }
+    }
+
+    topFaces.forEach { copyFaceColors(it, textureBySide.getValue(it.normal), true) }
+    atlases.forEach { atlas -> atlas.faces().forEach { copyFaceColors(it, textureByAtlas.getValue(atlas), false) } }
+
+    return Pair(textureBySide, textureByAtlas)
+}
+
+private fun getAssetsPath(options: Map<String, String>): String {
+    val modid = options["modid"]
+    val basePath = options["output"] ?: "assets"
+    return basePath + (modid?.let { "/$it" } ?: "")
+}
+
+private fun saveTextures(
+    baseName: String,
+    assetsPath: String,
+    options: Map<String, String>,
+    textureBySide: Map<Direction, BufferedImage>,
+    textureByAtlas: Map<TextureAtlas, BufferedImage>
+): Map<String, String> {
+    val texturesByName = mutableMapOf<String, String>()
+    val modid = options["modid"]
+
+    val textureAssetsPath = "$assetsPath/textures/blocks/$baseName"
+    Files.createDirectories(Paths.get(textureAssetsPath))
+
+    val prefix = (modid?.plus(":") ?: "") + "blocks/$baseName"
+    textureBySide.forEach { (direction, image) ->
+        val internalName = direction.getFaceName()
+        val name = "${baseName}_$internalName"
+        ImageIO.write(image, "png", File("$textureAssetsPath/$name.png"))
+        texturesByName[internalName] = "$prefix/$name"
+    }
+
+    textureByAtlas.forEach { (atlas, image) ->
+        val internalName = atlas.name
+        val name = "${baseName}_${internalName}"
+        ImageIO.write(image, "png", File("$textureAssetsPath/$name.png"))
+        texturesByName[internalName] = "$prefix/$name"
+    }
+
+    return texturesByName
+}

@@ -41,7 +41,7 @@ class BlockFace(
         from.toArray(), to.toArray(),
         mapOf(
             normal.getFaceName() to BlockModel.Face(
-                texture,
+                texture ?: normal.getFaceName(),
                 cullface = null,
                 uvs?.map { (it * 16).roundToInt() }?.toTypedArray()
             )
