@@ -12,29 +12,35 @@ class TextureAtlas(private val size: Int2) {
     } ?: emptySequence()
 
     fun add(face: BlockFace): Boolean {
-        if (face.size().x > size.x || face.size().y > size.y) {
-            return false
-        }
-        data?.let { data ->
-            if (face.size().y >= face.size().y) {
-                data.child0?.let { if (it.add(face)) return true }
-                data.child1?.let { if (it.add(face)) return true }
-            } else {
-                data.child1?.let { if (it.add(face)) return true }
-                data.child0?.let { if (it.add(face)) return true }
-            }
-            return false
-        }
-
         val faceSize = face.size()
         if (faceSize.x > size.x || faceSize.y > size.y) {
             return false
         }
 
+        data?.let { data ->
+            // See split diagram below, as such we try to pack wider-than-high
+            // faces to child1 first because it is wider than child0.
+            if (faceSize.x >= faceSize.y) {
+                data.child1?.let { if (it.add(face)) return true }
+                data.child0?.let { if (it.add(face)) return true }
+            } else {
+                data.child0?.let { if (it.add(face)) return true }
+                data.child1?.let { if (it.add(face)) return true }
+            }
+            return false
+        }
+
+        // We split as such:
+        // +------+--------+  -
+        // | face | child0 |  |
+        // +------+--------+  size.y
+        // |     child1    |  |
+        // +---------------+  -
+        // |--- size.x ----|
         val sizeChild0 = Int2(size.x - faceSize.x, faceSize.y)
-        val child0 = if (sizeChild0 != Int2.ZERO) TextureAtlas(sizeChild0) else null
+        val child0 = if (sizeChild0.x != 0) TextureAtlas(sizeChild0) else null
         val sizeChild1 = Int2(size.x, size.y - faceSize.y)
-        val child1 = if (sizeChild1 != Int2.ZERO) TextureAtlas(sizeChild1) else null
+        val child1 = if (sizeChild1.y != 0) TextureAtlas(sizeChild1) else null
         data = Data(face, child0, child1)
         return true
     }

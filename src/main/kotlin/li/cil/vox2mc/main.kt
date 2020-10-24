@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Paths
 import javax.imageio.ImageIO
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 fun main(args: Array<String>) {
@@ -72,19 +73,19 @@ fun main(args: Array<String>) {
 
         val voxels = getVoxels(vox)
 
-        logln(" done. Got %d voxel(s).".format(voxels.size))
+        logln(" done. Got %d voxels.".format(voxels.size))
 
         log("Extracting faces...")
 
         val allFaces = getFaces(voxels)
 
-        logln(" done. Got %d face(s).".format(allFaces.size))
+        logln(" done. Got %d faces.".format(allFaces.size))
 
         log("Grouping adjacent faces...")
 
         val groupedFaces = groupAdjacentFaces(allFaces)
 
-        logln(" done. Got %d grouped face(s).".format(groupedFaces.size))
+        logln(" done. Got %d grouped faces.".format(groupedFaces.size))
 
         log("Building quads from grouped faces...")
 
@@ -111,13 +112,7 @@ fun main(args: Array<String>) {
         val (occludedFaces, topFaces) = blockFaces.partition { isOccluded(it) }
 
         val atlases = mutableListOf<TextureAtlas>()
-//        val wideFaces = occludedFaces.filter { it.size().x > it.size().y }.sortedBy { -it.size().x }
-//        val highFaces = occludedFaces.filter { it.size().x < it.size().y }.sortedBy { -it.size().y }
-//        val otherFaces = occludedFaces - wideFaces - highFaces
-//        wideFaces.forEach { atlas.add(it) }
-//        highFaces.forEach { atlas.add(it) }
-//        otherFaces.forEach { atlas.add(it) }
-        occludedFaces.forEach { face ->
+        occludedFaces.sortedBy { -max(it.size().x, it.size().y) }.forEach { face ->
             if (!atlases.any { it.add(face) }) {
                 val atlas = TextureAtlas(MODEL_RESOLUTION)
                 require(atlas.add(face))
