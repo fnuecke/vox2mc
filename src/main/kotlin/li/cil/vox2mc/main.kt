@@ -110,7 +110,7 @@ fun main(args: Array<String>) {
             (textureBySide.values + textureByAtlas.values).forEach { applyNoise(it, noise, rng) }
         }
 
-        val texturesByName = saveTextures(baseName, assetsPath, modid, textureBySide, textureByAtlas)
+        val texturesByName = saveTextures(baseName, assetsPath, modid, textureBySide, textureByAtlas) + ("particle" to "#north")
 
         logln(" done.")
 
