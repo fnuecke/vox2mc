@@ -10,10 +10,9 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Paths
 import javax.imageio.ImageIO
-import kotlin.math.max
-import kotlin.math.pow
-import kotlin.math.roundToInt
+import kotlin.math.*
 import kotlin.random.Random
+import kotlin.reflect.KFunction2
 
 fun main(args: Array<String>) {
     if (args.isEmpty()) {
@@ -24,6 +23,7 @@ fun main(args: Array<String>) {
     var quiet = false
     var modid: String? = null
     var output = "assets"
+    var gradient = false
     var noisePower: Float? = null
 
     val (files, _) = args.partition { arg ->
@@ -35,6 +35,9 @@ fun main(args: Array<String>) {
             false
         } else if (arg.startsWith("-o=") || arg.startsWith("--output=")) {
             output = arg.split('=', limit = 2)[1]
+            false
+        } else if (arg.startsWith("-g") || arg.startsWith("--gradient")) {
+            gradient = true
             false
         } else if (arg.startsWith("-n=") || arg.startsWith("--noise=")) {
             // We actually only go up to 20% noise scale; anything more is silly, and the control
@@ -110,7 +113,25 @@ fun main(args: Array<String>) {
             (textureBySide.values + textureByAtlas.values).forEach { applyNoise(it, noise, rng) }
         }
 
-        val texturesByName = saveTextures(baseName, assetsPath, modid, textureBySide, textureByAtlas) + ("particle" to "#north")
+        if (gradient) {
+            textureBySide.forEach { (side, image) ->
+                val getGradient = gradientBySide(side)
+                applyGradient(image, 0 until image.width, 0 until image.height, getGradient)
+            }
+
+            textureByAtlas.forEach { (atlas, image) ->
+                atlas.faces().forEach { face ->
+                    val getGradient = gradientBySide(face.normal)
+                    require(image.width == image.height)
+                    val (x0, y0) = face.uv0().map { (it * image.width).roundToInt() }
+                    val (width, height) = face.size()
+                    applyGradient(image, x0 until x0 + width, y0 until y0 + height, getGradient)
+                }
+            }
+        }
+
+        val texturesByName = saveTextures(baseName, assetsPath, modid, textureBySide, textureByAtlas) +
+                ("particle" to "#north")
 
         logln(" done.")
 
@@ -565,6 +586,46 @@ fun applyNoise(image: BufferedImage, noiseStrength: Float, rng: Random) {
             val gGamma = (gNoise.pow(gamma) * 255).roundToInt()
             val bGamma = (bNoise.pow(gamma) * 255).roundToInt()
             image.setRGB(x, y, Int3(rGamma, gGamma, bGamma).toRGBInt())
+        }
+    }
+}
+
+private fun linearGradient(u: Float, v: Float) = 0.75f + 0.25f * min(1f, v * 1.25f)
+
+private fun radialGradient(u: Float, v: Float): Float {
+    val du = (u - 0.5f) * 1.25f
+    val dv = (v - 0.5f) * 1.25f
+    return 0.75f + 0.25f * sqrt(du * du + dv * dv)
+}
+
+private fun gradientBySide(side: Direction) = when (side) {
+    Direction.LEFT -> ::linearGradient
+    Direction.RIGHT -> ::linearGradient
+    Direction.UP -> ::radialGradient
+    Direction.DOWN -> ::radialGradient
+    Direction.FRONT -> ::linearGradient
+    Direction.BACK -> ::linearGradient
+}
+
+private fun applyGradient(
+    image: BufferedImage,
+    xRange: IntRange,
+    yRange: IntRange,
+    getGradient: KFunction2<Float, Float, Float>
+) {
+    for (x in xRange) {
+        for (y in yRange) {
+            val u = x / (image.width - 1).toFloat()
+            val v = 1 - y / (image.height - 1).toFloat()
+            val multiplier = getGradient(u, v)
+            val (r, g, b) = image.getRGB(x, y).toRGBInt3()
+            image.setRGB(
+                x, y, Int3(
+                    (r * multiplier).roundToInt().coerceIn(0..255),
+                    (g * multiplier).roundToInt().coerceIn(0..255),
+                    (b * multiplier).roundToInt().coerceIn(0..255)
+                ).toRGBInt()
+            )
         }
     }
 }
