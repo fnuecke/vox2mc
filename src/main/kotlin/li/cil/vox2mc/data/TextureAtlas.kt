@@ -1,6 +1,6 @@
 package li.cil.vox2mc.data
 
-class TextureAtlas(private val size: Int2, val name: String) {
+class TextureAtlas(val size: Int2, val name: String) {
     constructor(size: Int, name: String) : this(Int2(size, size), name)
 
     private var data: Data? = null

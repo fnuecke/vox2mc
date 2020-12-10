@@ -15,7 +15,7 @@ dependencies {
 }
 
 compileKotlin {
-    kotlinOptions.jvmTarget = '13'
+    kotlinOptions.jvmTarget = '11'
 }
 application {
     mainClassName = 'MainKt'

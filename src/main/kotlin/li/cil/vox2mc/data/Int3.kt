@@ -4,8 +4,6 @@ import kotlin.math.max
 import kotlin.math.min
 
 data class Int3(val x: Int, val y: Int, val z: Int) : Comparable<Int3> {
-    constructor(xy: Int2, z: Int) : this(xy.x, xy.y, z)
-
     companion object {
         val ZERO = Int3(0, 0, 0)
         val ONE = Int3(1, 1, 1)
@@ -13,12 +11,13 @@ data class Int3(val x: Int, val y: Int, val z: Int) : Comparable<Int3> {
 
     operator fun plus(v: Int3) = Int3(x + v.x, y + v.y, z + v.z)
     operator fun minus(v: Int3) = Int3(x - v.x, y - v.y, z - v.z)
+    operator fun times(v: Int3) = Int3(x * v.x, y * v.y, z * v.z)
     operator fun times(i: Int) = Int3(x * i, y * i, z * i)
     operator fun div(i: Int) = Int3(x / i, y / i, z / i)
+    operator fun unaryMinus() = Int3(-x, -y, -z)
 
     fun toInt2() = Int2(x, y)
     fun toArray() = arrayOf(x, y, z)
-    fun decompose() = arrayOf(Int3(x, 0, 0), Int3(0, y, 0), Int3(0, 0, z))
 
     override fun compareTo(other: Int3): Int {
         var d = x.compareTo(other.x)
@@ -26,6 +25,10 @@ data class Int3(val x: Int, val y: Int, val z: Int) : Comparable<Int3> {
         d = y.compareTo(other.y)
         if (d != 0) return d
         return z.compareTo(other.z)
+    }
+
+    override fun toString(): String {
+        return "[$x, $y, $z]"
     }
 }
 

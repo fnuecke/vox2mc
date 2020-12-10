@@ -10,7 +10,16 @@ enum class Direction {
     FRONT,
     BACK;
 
-    fun getFaceName(): String = when (this) {
+    fun opposite() = when (this) {
+        LEFT -> RIGHT
+        RIGHT -> LEFT
+        UP -> DOWN
+        DOWN -> UP
+        FRONT -> BACK
+        BACK -> FRONT
+    }
+
+    fun getFaceName() = when (this) {
         LEFT -> "east"
         RIGHT -> "west"
         UP -> "up"
@@ -77,19 +86,6 @@ enum class Direction {
             DOWN -> Int3(position.x, invert(position.y), position.z)
             FRONT -> Int3(invert(position.x), invert(position.z), position.y)
             BACK -> Int3(position.x, position.z, position.y)
-        }
-    }
-
-    // unproject from x = right, y = up, z = depth to x = left, y = up, z = front.
-    fun unprojectVertexToMinecraftSpace(position: Int3): Int3 {
-        fun invert(i: Int) = MODEL_RESOLUTION - i
-        return when (this) {
-            LEFT -> Int3(invert(position.z), position.y, invert(position.x))
-            RIGHT -> Int3(position.z, position.y, position.x)
-            UP -> Int3(position.x, invert(position.z), invert(position.y))
-            DOWN -> Int3(position.x, position.z, position.y)
-            FRONT -> Int3(invert(position.x), position.y, position.z)
-            BACK -> Int3(position.x, position.y, invert(position.z))
         }
     }
 }
