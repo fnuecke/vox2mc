@@ -18,5 +18,5 @@ compileKotlin {
     kotlinOptions.jvmTarget = '11'
 }
 application {
-    mainClassName = 'MainKt'
+    mainClassName = 'li.cil.vox2mc.MainKt'
 }
