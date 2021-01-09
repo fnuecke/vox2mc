@@ -159,13 +159,16 @@ fun main(args: Array<String>) {
             }
         }
 
-        val visibleFrom = topFaces.groupBy { it.normal }.flatMap { (normal, faces) ->
-            var queue = faces.flatMap { blockFaceAdjacency[it].orEmpty() }.filterNot { topFaces.contains(it) }
+        val borderFaces = topFaces.filter {
+            it.depth() == 0 || it.depth() == MODEL_RESOLUTION
+        }
+        val visibleFrom = borderFaces.groupBy { it.normal }.flatMap { (normal, faces) ->
+            var queue = faces.flatMap { blockFaceAdjacency[it].orEmpty() }.filterNot { borderFaces.contains(it) }
             val connectedFaces = mutableSetOf<BlockFace>()
             while (queue.isNotEmpty()) {
                 queue = queue.flatMap { face ->
                     if (connectedFaces.add(face)) {
-                        blockFaceAdjacency[face].orEmpty().filterNot { topFaces.contains(it) }
+                        blockFaceAdjacency[face].orEmpty().filterNot { borderFaces.contains(it) }
                     } else {
                         emptyList()
                     }
@@ -174,7 +177,7 @@ fun main(args: Array<String>) {
             connectedFaces.map { it to normal }
         }.groupBy { it.first }.mapValues { entry -> entry.value.map { it.second } }
 
-        topFaces.forEach { it.cullface = it.normal }
+        borderFaces.forEach { it.cullface = it.normal }
         visibleFrom.filterValues { it.size == 1 }.mapValues { it.value.single() }.forEach { (face, normal) ->
             face.cullface = normal
         }
@@ -248,9 +251,12 @@ private fun groupVoxels2(voxels: Map<Int3, Voxel>): Map<Voxel, List<Voxel>> {
                     break
                 }
 
-                // Queue is sorted, so next layer group cannot have been merged in current
-                // axis -> it fits our projection when it exactly contains the neighbor voxels.
-                val neighborGroup = neighborLayer.map { groups.getValue(it) }.distinct().single()
+                val neighborGroups = neighborLayer.map { groups.getValue(it) }.distinct()
+                if (neighborGroups.size > 1) {
+                    break
+                }
+
+                val neighborGroup = neighborGroups.single()
                 if (neighborGroup.size != neighborLayer.size) {
                     break
                 }
