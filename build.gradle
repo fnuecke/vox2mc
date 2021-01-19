@@ -2,8 +2,8 @@ plugins {
     id 'org.jetbrains.kotlin.jvm' version '1.4.10'
     id 'application'
 }
-group = 'li.cil.minecraft'
-version = '1.0-SNAPSHOT'
+group = 'li.cil.vox2mc'
+version = '0.0.1'
 
 repositories {
     mavenCentral()
