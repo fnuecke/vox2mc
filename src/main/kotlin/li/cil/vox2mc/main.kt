@@ -122,7 +122,7 @@ fun main(args: Array<String>) {
         }
 
         val texturesByName = saveTextures(baseName, assetsPath, modid, emptyMap(), textureByAtlas) +
-                ("particle" to "#north")
+                ("particle" to "#atlas0")
 
         logln(" done.")
 
