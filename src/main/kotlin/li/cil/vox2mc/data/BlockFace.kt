@@ -14,7 +14,7 @@ class BlockFace(
 
     fun uv0() = uvs?.sliceArray(0..1) ?: arrayOf(projectedFrom.x / 16f, projectedFrom.y / 16f)
 
-    fun size() = abs((projectedTo - projectedFrom).toInt2())
+    fun size() = abs(projectedTo.toInt2() - projectedFrom.toInt2())
 
     fun isAdjacentTo(f: BlockFace): Boolean {
         return false // todo

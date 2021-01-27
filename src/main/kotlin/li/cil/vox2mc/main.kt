@@ -14,7 +14,6 @@ import java.nio.file.Paths
 import javax.imageio.ImageIO
 import kotlin.math.*
 import kotlin.random.Random
-import kotlin.reflect.KFunction2
 
 fun main(args: Array<String>) {
     if (args.isEmpty()) {
@@ -114,9 +113,17 @@ fun main(args: Array<String>) {
                 atlas.faces().forEach { face ->
                     val getGradient = gradientBySide(face.normal)
                     require(image.width == image.height)
-                    val (x0, y0) = face.uv0().map { (it * image.width).roundToInt() }
+                    val projected = face.projectedFrom.toInt2()
+                    val (u0, v0) = face.uv0()
                     val (width, height) = face.size()
-                    applyGradient(image, x0 until x0 + width, y0 until y0 + height, getGradient)
+                    val x0 = (u0 * image.width).roundToInt()
+                    val y0 = (v0 * image.height).roundToInt()
+                    applyGradient(image, x0 until x0 + width, y0 until y0 + height) { x, y ->
+                        getGradient(
+                            (projected.x + (x - x0)) / MODEL_RESOLUTION.toFloat(),
+                            (projected.y + height - 1 - (y - y0)) / MODEL_RESOLUTION.toFloat()
+                        )
+                    }
                 }
             }
         }
@@ -402,13 +409,11 @@ private fun applyGradient(
     image: BufferedImage,
     xRange: IntRange,
     yRange: IntRange,
-    getGradient: KFunction2<Float, Float, Float>
+    getGradient: (Int, Int) -> Float
 ) {
     for (x in xRange) {
         for (y in yRange) {
-            val u = x / (image.width - 1).toFloat()
-            val v = 1 - y / (image.height - 1).toFloat()
-            val multiplier = getGradient(u, v)
+            val multiplier = getGradient(x, y)
             val (r, g, b) = image.getRGB(x, y).toRGBInt3()
             image.setRGB(
                 x, y, Int3(
