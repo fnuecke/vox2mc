@@ -1,5 +1,15 @@
 package li.cil.vox2mc
 
+import com.github.ajalt.clikt.core.CliktCommand
+import com.github.ajalt.clikt.core.Context
+import com.github.ajalt.clikt.core.main
+import com.github.ajalt.clikt.parameters.arguments.argument
+import com.github.ajalt.clikt.parameters.arguments.help
+import com.github.ajalt.clikt.parameters.arguments.multiple
+import com.github.ajalt.clikt.parameters.options.*
+import com.github.ajalt.clikt.parameters.types.file
+import com.github.ajalt.clikt.parameters.types.int
+import com.github.ajalt.clikt.parameters.types.restrictTo
 import com.google.gson.Gson
 import li.cil.vox2mc.algorithm.abgr2rgb
 import li.cil.vox2mc.algorithm.toRGBInt
@@ -12,188 +22,121 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Paths
 import javax.imageio.ImageIO
-import kotlin.math.*
+import kotlin.math.min
+import kotlin.math.pow
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 import kotlin.random.Random
 
-fun main(args: Array<String>) {
-    if (args.isEmpty()) {
-        println("Usage: vox2mc file.vox ...")
-        return
+private const val DEFAULT_ALIGNMENT = 2
+private const val NOISE_SCALE = 500f
+private const val DEFAULT_NOISE = 3
+private const val OPAQUE = 0xFF shl 24
+
+fun main(args: Array<String>) = Vox2Mc().main(args)
+
+class Vox2Mc : CliktCommand(name = "vox2mc") {
+    override fun help(context: Context) =
+        "Turns MagicaVoxel models into Minecraft block models, one quad soup and one sprite each."
+
+    private val quiet by option("-q", "--quiet").help("Suppress progress output.").flag()
+    private val modid by option("-m", "--modid", metavar = "ID").help("Mod id to qualify the texture reference with.")
+    private val output by option("-o", "--output", metavar = "PATH").help("Root directory to write assets to.")
+        .default("assets")
+    private val gradient by option("-g", "--gradient").help("Bake a soft directional gradient into the texture.")
+        .flag("--no-gradient", default = true, defaultForHelp = "enabled")
+    private val noise by option(
+        "-n",
+        "--noise",
+        metavar = "0-100"
+    ).help("Bake monochromatic noise into the texture. 0 turns it off.").int().restrictTo(0..100)
+        .default(DEFAULT_NOISE)
+    private val cutout by option("--cutout").help("Merge each surface layer into one quad, cutting the gaps away via alpha.")
+        .flag()
+    private val alignment by option(
+        "--align",
+        metavar = "N"
+    ).help("Texture atlas alignment. Keeps mip levels up to log2(N) free of foreign texels.").int()
+        .default(DEFAULT_ALIGNMENT).check("must be a power of two") { it > 0 && it and (it - 1) == 0 }
+    private val dedup by option("--dedup").help("Share one atlas slot between quads that render the same thing.")
+        .flag("--no-dedup", default = true, defaultForHelp = "enabled")
+    private val renderType by option(
+        "--render-type",
+        metavar = "ID"
+    ).help("Render type to declare in the model. Defaults to none, or to minecraft:cutout_mipped if --cutout cut anything.")
+
+    private val files by argument(name = "FILE").help("The .vox models to convert.")
+        .file(mustExist = true, canBeDir = false, mustBeReadable = true).multiple(required = true)
+
+    private fun log(message: String) {
+        if (!quiet) print(message)
     }
 
-    var quiet = false
-    var modid: String? = null
-    var output = "assets"
-    var gradient = false
-    var noisePower: Float? = null
-
-    val (files, _) = args.partition { arg ->
-        if (arg == "-q" || arg == "--quiet") {
-            quiet = true
-            false
-        } else if (arg.startsWith("-m=") || arg.startsWith("--modid=")) {
-            modid = arg.split('=', limit = 2)[1]
-            false
-        } else if (arg.startsWith("-o=") || arg.startsWith("--output=")) {
-            output = arg.split('=', limit = 2)[1]
-            false
-        } else if (arg.startsWith("-g") || arg.startsWith("--gradient")) {
-            gradient = true
-            false
-        } else if (arg.startsWith("-n=") || arg.startsWith("--noise=")) {
-            // We actually only go up to 20% noise scale; anything more is silly, and the control
-            // in the lower end is very helpful.
-            noisePower = arg.split('=', limit = 2)[1].toInt().coerceIn(0..100) / 500f
-            false
-        } else {
-            true
-        }
+    private fun logln(message: String) {
+        if (!quiet) println(message)
     }
 
-    fun log(msg: String) {
-        if (!quiet) print(msg)
+    override fun run() {
+        files.forEach { file -> convert(file) }
     }
 
-    fun logln(msg: String) {
-        if (!quiet) println(msg)
-    }
-
-    for (filename in files) {
-        val file = File(filename)
-        if (!file.exists()) {
-            logln("File [%s] not found, skipping.".format(filename))
-            continue
-        }
-
-        log("Loading file [%s]...".format(filename))
+    private fun convert(file: File) {
+        log("Loading file [%s]...".format(file))
 
         val vox = VoxLoader.loadVox(file)
-
-        logln(" done.")
-
-        log("Collecting voxels from loaded file...")
-
         val voxels = getVoxels(vox)
+        val palette = getPalette(vox)
 
         logln(" done. Got %d voxels.".format(voxels.size))
 
-        log("Grouping voxels...")
+        log("Meshing surface...")
 
-        val groupedVoxels = groupVoxels2(voxels)
+        val quads = buildQuads(voxels, cutout)
 
-        logln(" done. Got %d groups.".format(groupedVoxels.values.distinct().size))
+        logln(" done. Got %d quads, %d of which are cut.".format(quads.size, quads.count { !it.isOpaque }))
 
-        log("Generating block elements...")
+        log("Rendering quad textures...")
 
-        val blockElements = groupFacesByVoxelGroup(groupedVoxels)
-        val blockFaces = blockElements.flatMap { it.faces }
+        // Patches have to be finished - gradient included - before they can be compared, so this
+        // happens up front rather than as passes over the atlas.
+        quads.forEach { it.patch = renderPatch(it, voxels, palette, gradient) }
+        val patches = if (dedup) deduplicate(quads) else quads.map { it.patch }
 
-        logln(
-            " done. Got %d block elements with %d faces.".format(
-                blockElements.size,
-                blockElements.flatMap { it.faces }.size
-            )
-        )
+        logln(" done. %d quads share %d distinct textures.".format(quads.size, patches.size))
 
-        log("Generating UVs and saving textures...")
+        log("Packing texture atlas...")
+
+        val atlas = TextureAtlas.pack(patches, alignment)
+        val texture = paintAtlas(atlas, patches, voxels, palette)
+
+        // Noise has to come after deduplication: applied per quad it would make every patch unique
+        // and there would be nothing left to share.
+        if (noise > 0) {
+            applyNoise(texture, noise / NOISE_SCALE, Random(0xdeadbeef))
+        }
+        // Padding repeats the finished texels, so it has to come after everything that recolors them.
+        patches.forEach { paintPadding(texture, it, atlas.alignment) }
+
+        logln(" done. Sprite is %dx%d.".format(atlas.width, atlas.height))
+
+        log("Saving assets...")
 
         val baseName = file.nameWithoutExtension
         val assetsPath = output + (modid?.let { "/$it" } ?: "")
 
-        val atlases = generateAtlases(blockFaces)
-        val textureByAtlas = generateTextures(voxels, getPalette(vox), atlases)
+        val texturePath = Paths.get("$assetsPath/textures/block")
+        Files.createDirectories(texturePath)
+        ImageIO.write(texture, "png", texturePath.resolve("$baseName.png").toFile())
 
-        val rng = Random(0xdeadbeef)
-        noisePower?.let { noise ->
-            textureByAtlas.values.forEach { applyNoise(it, noise, rng) }
-        }
+        val textureName = (modid?.plus(":") ?: "") + "block/$baseName"
+        val model = BlockModel(
+            renderType ?: if (quads.any { !it.isOpaque }) "minecraft:cutout_mipped" else null,
+            mapOf("atlas" to textureName, "particle" to "#atlas"),
+            quads.map { it.toElement("atlas", atlas.width, atlas.height) })
 
-        if (gradient) {
-            textureByAtlas.forEach { (atlas, image) ->
-                atlas.faces().forEach { face ->
-                    val getGradient = gradientBySide(face.normal)
-                    require(image.width == image.height)
-                    val projected = face.projectedFrom.toInt2()
-                    val (u0, v0) = face.uv0()
-                    val (width, height) = face.size()
-                    val x0 = (u0 * image.width).roundToInt()
-                    val y0 = (v0 * image.height).roundToInt()
-                    applyGradient(image, x0 until x0 + width, y0 until y0 + height) { x, y ->
-                        getGradient(
-                            (projected.x + (x - x0)) / MODEL_RESOLUTION.toFloat(),
-                            (projected.y + height - 1 - (y - y0)) / MODEL_RESOLUTION.toFloat()
-                        )
-                    }
-                }
-            }
-        }
-
-        val texturesByName = saveTextures(baseName, assetsPath, modid, emptyMap(), textureByAtlas) +
-                ("particle" to "#atlas0")
-
-        logln(" done.")
-
-        log("Computing face culling...")
-
-        val blockFaceAdjacency = mutableMapOf<BlockFace, MutableSet<BlockFace>>()
-        blockFaces.forEachIndexed { index, face0 ->
-            blockFaces.drop(index + 1).forEach { face1 ->
-                if (face0.isAdjacentTo(face1)) {
-                    blockFaceAdjacency.computeIfAbsent(face0) { mutableSetOf() }.add(face1)
-                    blockFaceAdjacency.computeIfAbsent(face1) { mutableSetOf() }.add(face0)
-                }
-            }
-        }
-
-        val topFaces = blockFaces.filterNot {
-            it.voxels.all { voxel ->
-                voxels.containsKey(voxel.position + it.normal.normalInVoxSpace())
-            }
-        }.let { faces ->
-            fun isOccluded(f: BlockFace): Boolean {
-                val normal = f.normal.normalInVoxSpace()
-                return f.voxels.any { start ->
-                    !voxels.containsKey(start.position + normal) && (2..MODEL_RESOLUTION).any { i ->
-                        voxels.containsKey(start.position + normal * i)
-                    }
-                }
-            }
-            faces.filterNot { isOccluded(it) }
-        }
-        val borderFaces = topFaces.filter {
-            it.depth() == 0 || it.depth() == MODEL_RESOLUTION
-        }
-        val visibleFrom = borderFaces.groupBy { it.normal }.flatMap { (normal, faces) ->
-            var queue = faces.flatMap { blockFaceAdjacency[it].orEmpty() }.filterNot { borderFaces.contains(it) }
-            val connectedFaces = mutableSetOf<BlockFace>()
-            while (queue.isNotEmpty()) {
-                queue = queue.flatMap { face ->
-                    if (connectedFaces.add(face)) {
-                        blockFaceAdjacency[face].orEmpty().filterNot { borderFaces.contains(it) }
-                    } else {
-                        emptyList()
-                    }
-                }
-            }
-            connectedFaces.map { it to normal }
-        }.groupBy { it.first }.mapValues { entry -> entry.value.map { it.second } }
-
-        borderFaces.forEach { it.cullface = it.normal }
-        visibleFrom.filterValues { it.size == 1 }.mapValues { it.value.single() }.forEach { (face, normal) ->
-            face.cullface = normal
-        }
-
-        logln(" done.")
-
-        log("Saving block model...")
-
-        val blockModel = BlockModel(texturesByName, blockElements.map { it.toElement() }.toTypedArray())
-
-        val blockModelsAssetPath = "$assetsPath/models/block/"
-        Files.createDirectories(Paths.get(blockModelsAssetPath))
-
-        val blockModelPath = Paths.get(blockModelsAssetPath, "$baseName.json")
-        Files.writeString(blockModelPath, Gson().toJson(blockModel), StandardCharsets.UTF_8)
+        val modelPath = Paths.get("$assetsPath/models/block")
+        Files.createDirectories(modelPath)
+        Files.writeString(modelPath.resolve("$baseName.json"), Gson().toJson(model), StandardCharsets.UTF_8)
 
         logln(" done.")
     }
@@ -205,7 +148,9 @@ private fun getVoxels(vox: Chunk) = vox.children.flatMapIndexed { index, chunk -
     if (chunk.header.id == ChunkHeader.SIZE_CHUNK_ID) {
         require(chunk.content is SizeContent)
         val size = chunk.content.size
-        require(size.x == MODEL_RESOLUTION && size.y == MODEL_RESOLUTION && size.z == MODEL_RESOLUTION)
+        require(size.x == MODEL_RESOLUTION && size.y == MODEL_RESOLUTION && size.z == MODEL_RESOLUTION) {
+            "Model must be exactly ${MODEL_RESOLUTION}^3 voxels, got $size."
+        }
         val data = vox.children[index + 1]
         require(data.header.id == ChunkHeader.XYZI_CHUNK_ID)
         require(data.content is ModelContent)
@@ -225,151 +170,222 @@ private fun getPalette(vox: Chunk): Array<Int> {
     } else PaletteContent.DEFAULT_PALETTE
 }
 
-private fun groupVoxels2(voxels: Map<Int3, Voxel>): Map<Voxel, List<Voxel>> {
-    val groups = voxels.map { (_, voxel) -> voxel to mutableListOf(voxel) }.toMap().toMutableMap()
+private fun buildQuads(voxels: Map<Int3, Voxel>, cutout: Boolean): List<Quad> = Direction.values().flatMap { normal ->
+    val offset = normal.normalInVoxSpace()
 
-    val axes = sequenceOf(Int3(1, 0, 0), Int3(0, 1, 0), Int3(0, 0, 1))
-    axes.forEach { axis ->
-        val projection = Int3.ONE - axis // multiply with pos to get 2d pos in plane axis is normal of
+    // Projecting is a bijection, so each depth key holds exactly the voxels of one layer.
+    val solidByDepth = mutableMapOf<Int, MutableSet<Int2>>()
+    val visibleByDepth = mutableMapOf<Int, MutableSet<Int2>>()
+    voxels.keys.forEach { position ->
+        val projected = normal.projectFaceIndexFromVoxSpace(position)
+        solidByDepth.getOrPut(projected.z, ::mutableSetOf).add(projected.toInt2())
+        if (position + offset !in voxels) {
+            visibleByDepth.getOrPut(projected.z, ::mutableSetOf).add(projected.toInt2())
+        }
+    }
 
-        val queue = groups.values.distinct()
-            .sortedBy { group -> -group.minOf { dot(it.position, axis) } }
-            .toMutableList()
+    visibleByDepth.entries.sortedBy { it.key }.flatMap { (depth, visible) ->
+        val solid = solidByDepth.getValue(depth)
+        if (cutout) cutoutQuads(normal, depth, visible, solid)
+        else greedyQuads(normal, depth, visible, solid)
+    }
+}
+
+private fun greedyQuads(normal: Direction, depth: Int, visible: Set<Int2>, solid: Set<Int2>): List<Quad> {
+    val remaining = visible.toMutableSet()
+    val usable = solid.toMutableSet()
+    val quads = mutableListOf<Quad>()
+
+    for (v in 0 until MODEL_RESOLUTION) {
+        for (u in 0 until MODEL_RESOLUTION) {
+            if (Int2(u, v) !in remaining) continue
+
+            var width = 1
+            while (Int2(u + width, v) in usable) width++
+            var height = 1
+            while ((0 until width).all { Int2(u + it, v + height) in usable }) height++
+
+            // Trailing rows and columns holding nothing visible only add hidden area, so drop them.
+            while (height > 1 && (0 until width).none { Int2(u + it, v + height - 1) in remaining }) height--
+            while (width > 1 && (0 until height).none { Int2(u + width - 1, v + it) in remaining }) width--
+
+            val cells = mutableSetOf<Int2>()
+            for (y in 0 until height) {
+                for (x in 0 until width) {
+                    remaining.remove(Int2(u + x, v + y))
+                    usable.remove(Int2(u + x, v + y))
+                    cells.add(Int2(x, y))
+                }
+            }
+
+            quads.add(Quad(normal, u, v, width, height, depth, cells))
+        }
+    }
+
+    return quads
+}
+
+private fun cutoutQuads(normal: Direction, depth: Int, visible: Set<Int2>, solid: Set<Int2>): List<Quad> {
+    val unvisited = solid.toMutableSet()
+    val quads = mutableListOf<Quad>()
+
+    solid.sortedWith(compareBy({ it.y }, { it.x })).forEach { seed ->
+        if (!unvisited.remove(seed)) return@forEach
+
+        val patch = mutableSetOf(seed)
+        val queue = ArrayDeque(listOf(seed))
         while (queue.isNotEmpty()) {
-            val group = queue.removeLast()
-
-            // Grab top layer in direction we're trying to expand this group, then keep
-            // going as long as we can.
-            var topLayer = group.maxOf { dot(it.position, axis) }
-            while (true) {
-                val layer = group.map {
-                    voxels.getValue(projection * it.position + axis * topLayer)
-                }.toSet()
-                topLayer++
-
-                val neighborLayer = layer.mapNotNull { voxels[it.position + axis] }
-                if (neighborLayer.size != layer.size) {
-                    break
+            val cell = queue.removeFirst()
+            sequenceOf(Int2(1, 0), Int2(-1, 0), Int2(0, 1), Int2(0, -1)).forEach { direction ->
+                val neighbor = cell + direction
+                if (unvisited.remove(neighbor)) {
+                    patch.add(neighbor)
+                    queue.add(neighbor)
                 }
-
-                val neighborGroups = neighborLayer.map { groups.getValue(it) }.distinct()
-                if (neighborGroups.size > 1) {
-                    break
-                }
-
-                val neighborGroup = neighborGroups.single()
-                if (neighborGroup.size != neighborLayer.size) {
-                    break
-                }
-
-                neighborGroup.forEach { voxel -> groups[voxel] = group }
-                group.addAll(neighborGroup)
-                queue.remove(neighborGroup)
             }
         }
+
+        // The patch may reach far past what is actually visible; only the visible part needs a quad.
+        val required = patch.filter { it in visible }
+        if (required.isEmpty()) return@forEach
+
+        val u0 = required.minOf { it.x }
+        val v0 = required.minOf { it.y }
+        val width = required.maxOf { it.x } - u0 + 1
+        val height = required.maxOf { it.y } - v0 + 1
+
+        val cells = patch.filter { it.x - u0 in 0 until width && it.y - v0 in 0 until height }
+            .map { Int2(it.x - u0, it.y - v0) }.toSet()
+
+        quads.add(Quad(normal, u0, v0, width, height, depth, cells))
     }
 
-    return groups
+    return quads
 }
 
-fun groupFacesByVoxelGroup(groupedVoxels: Map<Voxel, List<Voxel>>): List<BlockElement> {
-    val allVoxelPositions = groupedVoxels.keys.map { it.position }.toSet()
-    return groupedVoxels.values.distinct().mapNotNull { group ->
-        val voxelPositions = group.map { it.position }.toSet()
-        val from = voxelPositions.minOrNull()!!
-        val to = voxelPositions.maxOrNull()!! + Int3.ONE // voxel coord to vertex coord
+private fun deduplicate(quads: List<Quad>): List<Patch> {
+    // Keyed by every mirroring of each stored patch, so a later quad finds a match whichever way
+    // round it happens to be, and learns the flip that reads the stored one back.
+    val byOrientation = HashMap<Patch, Pair<Patch, UvFlip>>()
+    val unique = mutableListOf<Patch>()
 
-        val faceVoxels = Direction.values().map { direction ->
-            // Grab voxels in group that define face of this group with direction as normal.
-            direction to group.filterNot {
-                voxelPositions.contains(it.position + direction.normalInVoxSpace())
-            }
-        }.toMap()
-
-        val faceVisibility = faceVoxels.map { (direction, voxels) ->
-            direction to voxels.any { !allVoxelPositions.contains(it.position + direction.normalInVoxSpace()) }
-        }.toMap()
-
-        if (!faceVisibility.values.any()) {
-            return@mapNotNull null
+    quads.forEach { quad ->
+        val match = byOrientation[quad.patch]
+        if (match != null) {
+            quad.patch = match.first
+            quad.flip = match.second
+        } else {
+            val stored = quad.patch
+            unique.add(stored)
+            // NONE first, so a symmetric patch is stored the way round it was drawn.
+            UvFlip.entries.forEach { flip -> byOrientation.putIfAbsent(stored.mirrored(flip), stored to flip) }
         }
+    }
 
-        val faces = faceVoxels.filterKeys { normal ->
-            faceVisibility.getValue(normal) || !faceVisibility.getValue(normal.opposite())
-        }.map { (normal, voxels) ->
-            val projectedPositions = voxels.map {
-                normal.projectFaceIndexFromVoxSpace(it.position)
+    return unique
+}
+
+private fun renderPatch(quad: Quad, voxels: Map<Int3, Voxel>, palette: Array<Int>, gradient: Boolean): Patch {
+    val pixels = IntArray(quad.width * quad.height)
+    for (y in 0 until quad.height) {
+        for (x in 0 until quad.width) {
+            if (!quad.contains(x, y)) {
+                // Cleared for now; the color follows below, once we know what is next to it.
+                pixels[patchIndex(quad, x, y)] = 0
+                continue
             }
-
-            val minPos = projectedPositions.reduce { acc, v -> min(acc, v) }
-            val maxPos = projectedPositions.reduce { acc, v -> max(acc, v) } + Int3(1, 1, 0)
-
-            BlockFace(voxels, minPos, maxPos, normal)
+            val color = OPAQUE or abgr2rgb(palette[voxels.getValue(quad.voxelAt(x, y)).colorIndex])
+            pixels[patchIndex(quad, x, y)] = if (gradient) shade(color, quad, x, y) else color
         }
+    }
 
-        val mcFrom = Int3(from.x, from.z, 16 - from.y)
-        val mcTo = Int3(to.x, to.z, 16 - to.y)
+    if (!quad.isOpaque) {
+        fillCutCells(pixels, quad)
+    }
 
-        BlockElement(min(mcFrom, mcTo), max(mcFrom, mcTo), faces)
+    return Patch(quad.width, quad.height, pixels)
+}
+
+// Patches are stored in image order, where row 0 is the quad's topmost row.
+private fun patchIndex(quad: Quad, x: Int, y: Int) = (quad.height - 1 - y) * quad.width + x
+
+private fun fillCutCells(pixels: IntArray, quad: Quad) {
+    val filled = quad.opaque.toMutableSet()
+    var frontier = quad.opaque.toList()
+    while (frontier.isNotEmpty()) {
+        val next = mutableListOf<Int2>()
+        frontier.forEach { cell ->
+            sequenceOf(Int2(1, 0), Int2(-1, 0), Int2(0, 1), Int2(0, -1)).forEach { direction ->
+                val neighbor = cell + direction
+                if (neighbor.x !in 0 until quad.width || neighbor.y !in 0 until quad.height) return@forEach
+                if (!filled.add(neighbor)) return@forEach
+                pixels[patchIndex(quad, neighbor.x, neighbor.y)] = pixels[patchIndex(quad, cell.x, cell.y)] and 0xFFFFFF
+                next.add(neighbor)
+            }
+        }
+        frontier = next
     }
 }
 
-private fun generateAtlases(faces: List<BlockFace>): List<TextureAtlas> {
-    val atlases = mutableListOf<TextureAtlas>()
-    faces.sortedBy { -max(it.size().x, it.size().y) }.forEach { face ->
-        if (!atlases.any { it.add(face) }) {
-            val atlas = TextureAtlas(MODEL_RESOLUTION * 2, "atlas" + atlases.size)
-            require(atlas.add(face))
-            atlases.add(atlas)
+private fun paintAtlas(
+    atlas: TextureAtlas, patches: List<Patch>, voxels: Map<Int3, Voxel>, palette: Array<Int>
+): BufferedImage {
+    val texture = BufferedImage(atlas.width, atlas.height, BufferedImage.TYPE_INT_ARGB)
+
+    // Unused atlas area is filled with the model's mean color rather than left black, so the mip
+    // levels past what the alignment protects fade into something plausible.
+    val background = OPAQUE or meanColor(voxels, palette)
+    for (y in 0 until atlas.height) {
+        for (x in 0 until atlas.width) {
+            texture.setRGB(x, y, background)
         }
     }
-    atlases.forEach { it.applyUVs() }
 
-    atlases.forEach { atlas -> atlas.faces().forEach { it.texture = atlas.name } }
-
-    return atlases
-}
-
-private fun generateTextures(
-    voxels: Map<Int3, Voxel>,
-    palette: Array<Int>,
-    atlases: List<TextureAtlas>
-): Map<TextureAtlas, BufferedImage> {
-    val textureByAtlas = atlases.map {
-        it to BufferedImage(it.size.x, it.size.y, BufferedImage.TYPE_INT_RGB)
-    }.toMap()
-
-    fun copyFaceColors(face: BlockFace, texture: BufferedImage, flipY: Boolean) {
-        val (u0, v0) = face.uv0()
-        val x0 = (u0 * texture.width).roundToInt()
-        val y0 = (v0 * texture.width).roundToInt()
-        val size = face.size()
-        val origin = face.normal.unprojectVertexToVoxSpace(face.projectedFrom)
-        val right = face.normal.rightInVoxSpace()
-        val up = face.normal.upInVoxSpace()
-        for (x in 0 until size.x) {
-            for (y in 0 until size.y) {
-                val facePosition = origin + right * x + up * y
-                val voxelCoordinate = face.normal.faceToVoxelCoordinate(facePosition)
-                val voxel = voxels.getValue(voxelCoordinate)
-                val color = palette[voxel.colorIndex]
-                val pixelX = x0 + x
-                val pixelY = if (flipY) texture.height - 1 - (y0 + y) else (y0 + size.y - y - 1)
-                texture.setRGB(pixelX, pixelY, abgr2rgb(color))
+    patches.forEach { patch ->
+        for (y in 0 until patch.height) {
+            for (x in 0 until patch.width) {
+                texture.setRGB(patch.atlasX + x, patch.atlasY + y, patch[x, y])
             }
         }
     }
 
-    atlases.forEach { atlas -> atlas.faces().forEach { copyFaceColors(it, textureByAtlas.getValue(atlas), false) } }
+    return texture
+}
 
-    return textureByAtlas
+private fun paintPadding(texture: BufferedImage, patch: Patch, alignment: Int) {
+    val slotWidth = TextureAtlas.align(patch.width, alignment)
+    val slotHeight = TextureAtlas.align(patch.height, alignment)
+    for (y in 0 until slotHeight) {
+        for (x in 0 until slotWidth) {
+            if (x < patch.width && y < patch.height) continue
+            val color = texture.getRGB(
+                patch.atlasX + min(x, patch.width - 1), patch.atlasY + min(y, patch.height - 1)
+            )
+            texture.setRGB(patch.atlasX + x, patch.atlasY + y, color)
+        }
+    }
+}
+
+private fun meanColor(voxels: Map<Int3, Voxel>, palette: Array<Int>): Int {
+    var r = 0L
+    var g = 0L
+    var b = 0L
+    voxels.values.forEach { voxel ->
+        val (cr, cg, cb) = abgr2rgb(palette[voxel.colorIndex]).toRGBInt3()
+        r += cr
+        g += cg
+        b += cb
+    }
+    val count = voxels.size.coerceAtLeast(1)
+    return Int3((r / count).toInt(), (g / count).toInt(), (b / count).toInt()).toRGBInt()
 }
 
 // Applies uniform monochromatic noise in linear color space.
 fun applyNoise(image: BufferedImage, noiseStrength: Float, rng: Random) {
     for (x in 0 until image.width) {
         for (y in 0 until image.height) {
-            val (r, g, b) = image.getRGB(x, y).toRGBInt3()
+            val argb = image.getRGB(x, y)
+            val (r, g, b) = argb.toRGBInt3()
             val gamma = 2.2f // good enough for our purposes
             val rLinear = (r / 255f).pow(1f / gamma)
             val gLinear = (g / 255f).pow(1f / gamma)
@@ -383,7 +399,7 @@ fun applyNoise(image: BufferedImage, noiseStrength: Float, rng: Random) {
             val rGamma = (rNoise.pow(gamma) * 255).roundToInt()
             val gGamma = (gNoise.pow(gamma) * 255).roundToInt()
             val bGamma = (bNoise.pow(gamma) * 255).roundToInt()
-            image.setRGB(x, y, Int3(rGamma, gGamma, bGamma).toRGBInt())
+            image.setRGB(x, y, (argb and OPAQUE) or Int3(rGamma, gGamma, bGamma).toRGBInt())
         }
     }
 }
@@ -397,61 +413,19 @@ private fun radialGradient(u: Float, v: Float): Float {
 }
 
 private fun gradientBySide(side: Direction) = when (side) {
-    Direction.LEFT -> ::linearGradient
-    Direction.RIGHT -> ::linearGradient
-    Direction.UP -> ::radialGradient
-    Direction.DOWN -> ::radialGradient
-    Direction.FRONT -> ::linearGradient
-    Direction.BACK -> ::linearGradient
+    Direction.UP, Direction.DOWN -> ::radialGradient
+    else -> ::linearGradient
 }
 
-private fun applyGradient(
-    image: BufferedImage,
-    xRange: IntRange,
-    yRange: IntRange,
-    getGradient: (Int, Int) -> Float
-) {
-    for (x in xRange) {
-        for (y in yRange) {
-            val multiplier = getGradient(x, y)
-            val (r, g, b) = image.getRGB(x, y).toRGBInt3()
-            image.setRGB(
-                x, y, Int3(
-                    (r * multiplier).roundToInt().coerceIn(0..255),
-                    (g * multiplier).roundToInt().coerceIn(0..255),
-                    (b * multiplier).roundToInt().coerceIn(0..255)
-                ).toRGBInt()
-            )
-        }
-    }
-}
-
-private fun saveTextures(
-    baseName: String,
-    assetsPath: String,
-    modid: String?,
-    textureBySide: Map<Direction, BufferedImage>,
-    textureByAtlas: Map<TextureAtlas, BufferedImage>
-): Map<String, String> {
-    val texturesByName = mutableMapOf<String, String>()
-
-    val textureAssetsPath = "$assetsPath/textures/block/$baseName"
-    Files.createDirectories(Paths.get(textureAssetsPath))
-
-    val prefix = (modid?.plus(":") ?: "") + "block/$baseName"
-    textureBySide.forEach { (direction, image) ->
-        val internalName = direction.getFaceName()
-        val name = "${baseName}_$internalName"
-        ImageIO.write(image, "png", File("$textureAssetsPath/$name.png"))
-        texturesByName[internalName] = "$prefix/$name"
-    }
-
-    textureByAtlas.forEach { (atlas, image) ->
-        val internalName = atlas.name
-        val name = "${baseName}_${internalName}"
-        ImageIO.write(image, "png", File("$textureAssetsPath/$name.png"))
-        texturesByName[internalName] = "$prefix/$name"
-    }
-
-    return texturesByName
+private fun shade(color: Int, quad: Quad, x: Int, y: Int): Int {
+    val multiplier = gradientBySide(quad.normal)(
+        (quad.u0 + x) / MODEL_RESOLUTION.toFloat(), (quad.v0 + y) / MODEL_RESOLUTION.toFloat()
+    )
+    val (r, g, b) = color.toRGBInt3()
+    val shaded = Int3(
+        (r * multiplier).roundToInt().coerceIn(0..255),
+        (g * multiplier).roundToInt().coerceIn(0..255),
+        (b * multiplier).roundToInt().coerceIn(0..255)
+    )
+    return (color and OPAQUE) or shaded.toRGBInt()
 }
