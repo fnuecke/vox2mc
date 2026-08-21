@@ -1,6 +1,7 @@
 package li.cil.vox2mc
 
 import com.github.ajalt.clikt.core.CliktCommand
+import com.github.ajalt.clikt.core.CliktError
 import com.github.ajalt.clikt.core.Context
 import com.github.ajalt.clikt.core.main
 import com.github.ajalt.clikt.parameters.arguments.argument
@@ -77,7 +78,12 @@ class Vox2Mc : CliktCommand(name = "vox2mc") {
     }
 
     override fun run() {
-        files.forEach { file -> convert(file) }
+        val duplicates = files.groupBy { it.nameWithoutExtension }.filterValues { it.size > 1 }.keys
+        if (duplicates.isNotEmpty()) {
+            throw CliktError("Multiple input files map to the same model: ${duplicates.joinToString()}.")
+        }
+
+        files.sortedBy { it.name }.forEach { file -> convert(file) }
     }
 
     private fun convert(file: File) {
@@ -86,6 +92,9 @@ class Vox2Mc : CliktCommand(name = "vox2mc") {
         val vox = VoxLoader.loadVox(file)
         val voxels = getVoxels(vox)
         val palette = getPalette(vox)
+        if (voxels.isEmpty()) {
+            throw CliktError("Model [$file] contains no voxels.")
+        }
 
         logln(" done. Got %d voxels.".format(voxels.size))
 
@@ -170,7 +179,55 @@ private fun getPalette(vox: Chunk): Array<Int> {
     } else PaletteContent.DEFAULT_PALETTE
 }
 
-private fun buildQuads(voxels: Map<Int3, Voxel>, cutout: Boolean): List<Quad> = Direction.values().flatMap { normal ->
+private fun buildQuads(voxels: Map<Int3, Voxel>, cutout: Boolean): List<Quad> {
+    val airContacts = if (isFullBounds(voxels)) airBoundaryContacts(voxels) else null
+    return Direction.entries.flatMap { normal ->
+        buildQuadsForDirection(voxels, cutout, normal, airContacts)
+    }
+}
+
+private fun isFullBounds(voxels: Map<Int3, Voxel>) =
+    voxels.keys.let { keys ->
+        intArrayOf(0, MODEL_RESOLUTION - 1).all { bound ->
+            keys.any { it.x == bound } && keys.any { it.y == bound } && keys.any { it.z == bound }
+        }
+    }
+
+private fun airBoundaryContacts(voxels: Map<Int3, Voxel>): Map<Int3, Set<Direction>> {
+    val contacts = HashMap<Int3, Set<Direction>>()
+    val inBox = { p: Int3 ->
+        p.x in 0 until MODEL_RESOLUTION && p.y in 0 until MODEL_RESOLUTION && p.z in 0 until MODEL_RESOLUTION
+    }
+    for (x in 0 until MODEL_RESOLUTION) {
+        for (y in 0 until MODEL_RESOLUTION) {
+            for (z in 0 until MODEL_RESOLUTION) {
+                val seed = Int3(x, y, z)
+                if (seed in voxels || seed in contacts) continue
+
+                val queue = ArrayDeque(listOf(seed))
+                val touched = mutableSetOf<Direction>()
+                contacts[seed] = touched
+                while (queue.isNotEmpty()) {
+                    val cell = queue.removeFirst()
+                    Direction.entries.forEach { direction ->
+                        val neighbor = cell + direction.normalInVoxSpace()
+                        if (!inBox(neighbor)) {
+                            touched.add(direction)
+                        } else if (neighbor !in voxels && neighbor !in contacts) {
+                            contacts[neighbor] = touched
+                            queue.add(neighbor)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return contacts
+}
+
+private fun buildQuadsForDirection(
+    voxels: Map<Int3, Voxel>, cutout: Boolean, normal: Direction, airContacts: Map<Int3, Set<Direction>>?
+): List<Quad> {
     val offset = normal.normalInVoxSpace()
 
     // Projecting is a bijection, so each depth key holds exactly the voxels of one layer.
@@ -184,10 +241,21 @@ private fun buildQuads(voxels: Map<Int3, Voxel>, cutout: Boolean): List<Quad> = 
         }
     }
 
-    visibleByDepth.entries.sortedBy { it.key }.flatMap { (depth, visible) ->
+    return visibleByDepth.entries.sortedBy { it.key }.flatMap { (depth, visible) ->
         val solid = solidByDepth.getValue(depth)
-        if (cutout) cutoutQuads(normal, depth, visible, solid)
+        val quads = if (cutout) cutoutQuads(normal, depth, visible, solid)
         else greedyQuads(normal, depth, visible, solid)
+
+        // An inset face may be flagged for culling if every sightline to it must pass through the
+        // covering neighbor: the air its visible cells front reaches no other side of the box.
+        quads.forEach { quad ->
+            quad.cullable = quad.depth == 0 || airContacts != null && quad.opaque.all { cell ->
+                Int2(quad.u0 + cell.x, quad.v0 + cell.y) !in visible ||
+                        airContacts.getValue(quad.voxelAt(cell.x, cell.y) + offset).all { it == normal }
+            }
+        }
+
+        quads
     }
 }
 

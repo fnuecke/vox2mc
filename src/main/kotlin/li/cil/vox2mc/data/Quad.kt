@@ -13,7 +13,9 @@ class Quad(
 
     var flip = UvFlip.NONE
 
-    val cullface get() = if (depth == 0) normal else null
+    var cullable = depth == 0
+
+    val cullface get() = if (cullable) normal else null
 
     val isOpaque get() = opaque.size == width * height
 
