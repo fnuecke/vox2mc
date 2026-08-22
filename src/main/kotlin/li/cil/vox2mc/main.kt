@@ -52,8 +52,6 @@ class Vox2Mc : CliktCommand(name = "vox2mc") {
         metavar = "0-100"
     ).help("Bake monochromatic noise into the texture. 0 turns it off.").int().restrictTo(0..100)
         .default(DEFAULT_NOISE)
-    private val cutout by option("--cutout").help("Merge each surface layer into one quad, cutting the gaps away via alpha.")
-        .flag()
     private val alignment by option(
         "--align",
         metavar = "N"
@@ -64,7 +62,7 @@ class Vox2Mc : CliktCommand(name = "vox2mc") {
     private val renderType by option(
         "--render-type",
         metavar = "ID"
-    ).help("Render type to declare in the model. Defaults to none, or to minecraft:cutout_mipped if --cutout cut anything.")
+    ).help("Render type to declare in the model. Defaults to none.")
 
     private val files by argument(name = "FILE").help("The .vox models to convert.")
         .file(mustExist = true, canBeDir = false, mustBeReadable = true).multiple(required = true)
@@ -100,9 +98,9 @@ class Vox2Mc : CliktCommand(name = "vox2mc") {
 
         log("Meshing surface...")
 
-        val quads = buildQuads(voxels, cutout)
+        val quads = buildQuads(voxels)
 
-        logln(" done. Got %d quads, %d of which are cut.".format(quads.size, quads.count { !it.isOpaque }))
+        logln(" done. Got %d quads.".format(quads.size))
 
         log("Rendering quad textures...")
 
@@ -139,7 +137,7 @@ class Vox2Mc : CliktCommand(name = "vox2mc") {
 
         val textureName = (modid?.plus(":") ?: "") + "block/$baseName"
         val model = BlockModel(
-            renderType ?: if (quads.any { !it.isOpaque }) "minecraft:cutout_mipped" else null,
+            renderType,
             mapOf("atlas" to textureName, "particle" to "#atlas"),
             quads.map { it.toElement("atlas", atlas.width, atlas.height) })
 
@@ -179,10 +177,10 @@ private fun getPalette(vox: Chunk): Array<Int> {
     } else PaletteContent.DEFAULT_PALETTE
 }
 
-private fun buildQuads(voxels: Map<Int3, Voxel>, cutout: Boolean): List<Quad> {
+private fun buildQuads(voxels: Map<Int3, Voxel>): List<Quad> {
     val airContacts = if (isFullBounds(voxels)) airBoundaryContacts(voxels) else null
     return Direction.entries.flatMap { normal ->
-        buildQuadsForDirection(voxels, cutout, normal, airContacts)
+        buildQuadsForDirection(voxels, normal, airContacts)
     }
 }
 
@@ -226,7 +224,7 @@ private fun airBoundaryContacts(voxels: Map<Int3, Voxel>): Map<Int3, Set<Directi
 }
 
 private fun buildQuadsForDirection(
-    voxels: Map<Int3, Voxel>, cutout: Boolean, normal: Direction, airContacts: Map<Int3, Set<Direction>>?
+    voxels: Map<Int3, Voxel>, normal: Direction, airContacts: Map<Int3, Set<Direction>>?
 ): List<Quad> {
     val offset = normal.normalInVoxSpace()
 
@@ -243,13 +241,12 @@ private fun buildQuadsForDirection(
 
     return visibleByDepth.entries.sortedBy { it.key }.flatMap { (depth, visible) ->
         val solid = solidByDepth.getValue(depth)
-        val quads = if (cutout) cutoutQuads(normal, depth, visible, solid)
-        else greedyQuads(normal, depth, visible, solid)
+        val quads = greedyQuads(normal, depth, visible, solid)
 
         // An inset face may be flagged for culling if every sightline to it must pass through the
         // covering neighbor: the air its visible cells front reaches no other side of the box.
         quads.forEach { quad ->
-            quad.cullable = quad.depth == 0 || airContacts != null && quad.opaque.all { cell ->
+            quad.cullable = quad.depth == 0 || airContacts != null && quad.cells().all { cell ->
                 Int2(quad.u0 + cell.x, quad.v0 + cell.y) !in visible ||
                         airContacts.getValue(quad.voxelAt(cell.x, cell.y) + offset).all { it == normal }
             }
@@ -277,55 +274,15 @@ private fun greedyQuads(normal: Direction, depth: Int, visible: Set<Int2>, solid
             while (height > 1 && (0 until width).none { Int2(u + it, v + height - 1) in remaining }) height--
             while (width > 1 && (0 until height).none { Int2(u + width - 1, v + it) in remaining }) width--
 
-            val cells = mutableSetOf<Int2>()
             for (y in 0 until height) {
                 for (x in 0 until width) {
                     remaining.remove(Int2(u + x, v + y))
                     usable.remove(Int2(u + x, v + y))
-                    cells.add(Int2(x, y))
                 }
             }
 
-            quads.add(Quad(normal, u, v, width, height, depth, cells))
+            quads.add(Quad(normal, u, v, width, height, depth))
         }
-    }
-
-    return quads
-}
-
-private fun cutoutQuads(normal: Direction, depth: Int, visible: Set<Int2>, solid: Set<Int2>): List<Quad> {
-    val unvisited = solid.toMutableSet()
-    val quads = mutableListOf<Quad>()
-
-    solid.sortedWith(compareBy({ it.y }, { it.x })).forEach { seed ->
-        if (!unvisited.remove(seed)) return@forEach
-
-        val patch = mutableSetOf(seed)
-        val queue = ArrayDeque(listOf(seed))
-        while (queue.isNotEmpty()) {
-            val cell = queue.removeFirst()
-            sequenceOf(Int2(1, 0), Int2(-1, 0), Int2(0, 1), Int2(0, -1)).forEach { direction ->
-                val neighbor = cell + direction
-                if (unvisited.remove(neighbor)) {
-                    patch.add(neighbor)
-                    queue.add(neighbor)
-                }
-            }
-        }
-
-        // The patch may reach far past what is actually visible; only the visible part needs a quad.
-        val required = patch.filter { it in visible }
-        if (required.isEmpty()) return@forEach
-
-        val u0 = required.minOf { it.x }
-        val v0 = required.minOf { it.y }
-        val width = required.maxOf { it.x } - u0 + 1
-        val height = required.maxOf { it.y } - v0 + 1
-
-        val cells = patch.filter { it.x - u0 in 0 until width && it.y - v0 in 0 until height }
-            .map { Int2(it.x - u0, it.y - v0) }.toSet()
-
-        quads.add(Quad(normal, u0, v0, width, height, depth, cells))
     }
 
     return quads
@@ -357,18 +314,9 @@ private fun renderPatch(quad: Quad, voxels: Map<Int3, Voxel>, palette: Array<Int
     val pixels = IntArray(quad.width * quad.height)
     for (y in 0 until quad.height) {
         for (x in 0 until quad.width) {
-            if (!quad.contains(x, y)) {
-                // Cleared for now; the color follows below, once we know what is next to it.
-                pixels[patchIndex(quad, x, y)] = 0
-                continue
-            }
             val color = OPAQUE or abgr2rgb(palette[voxels.getValue(quad.voxelAt(x, y)).colorIndex])
             pixels[patchIndex(quad, x, y)] = if (gradient) shade(color, quad, x, y) else color
         }
-    }
-
-    if (!quad.isOpaque) {
-        fillCutCells(pixels, quad)
     }
 
     return Patch(quad.width, quad.height, pixels)
@@ -376,24 +324,6 @@ private fun renderPatch(quad: Quad, voxels: Map<Int3, Voxel>, palette: Array<Int
 
 // Patches are stored in image order, where row 0 is the quad's topmost row.
 private fun patchIndex(quad: Quad, x: Int, y: Int) = (quad.height - 1 - y) * quad.width + x
-
-private fun fillCutCells(pixels: IntArray, quad: Quad) {
-    val filled = quad.opaque.toMutableSet()
-    var frontier = quad.opaque.toList()
-    while (frontier.isNotEmpty()) {
-        val next = mutableListOf<Int2>()
-        frontier.forEach { cell ->
-            sequenceOf(Int2(1, 0), Int2(-1, 0), Int2(0, 1), Int2(0, -1)).forEach { direction ->
-                val neighbor = cell + direction
-                if (neighbor.x !in 0 until quad.width || neighbor.y !in 0 until quad.height) return@forEach
-                if (!filled.add(neighbor)) return@forEach
-                pixels[patchIndex(quad, neighbor.x, neighbor.y)] = pixels[patchIndex(quad, cell.x, cell.y)] and 0xFFFFFF
-                next.add(neighbor)
-            }
-        }
-        frontier = next
-    }
-}
 
 private fun paintAtlas(
     atlas: TextureAtlas, patches: List<Patch>, voxels: Map<Int3, Voxel>, palette: Array<Int>

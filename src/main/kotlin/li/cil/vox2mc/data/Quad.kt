@@ -6,8 +6,7 @@ class Quad(
     val normal: Direction,
     val u0: Int, val v0: Int,
     val width: Int, val height: Int,
-    val depth: Int,
-    val opaque: Set<Int2>
+    val depth: Int
 ) {
     lateinit var patch: Patch
 
@@ -17,9 +16,7 @@ class Quad(
 
     val cullface get() = if (cullable) normal else null
 
-    val isOpaque get() = opaque.size == width * height
-
-    fun contains(x: Int, y: Int) = Int2(x, y) in opaque
+    fun cells() = (0 until width).flatMap { x -> (0 until height).map { y -> Int2(x, y) } }
 
     fun voxelAt(x: Int, y: Int): Int3 {
         val origin = normal.unprojectVertexToVoxSpace(Int3(u0, v0, depth))
