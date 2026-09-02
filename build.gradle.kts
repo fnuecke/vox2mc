@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.2.20"
+    alias(libs.plugins.kotlinJvm)
     application
     `maven-publish`
 }
@@ -18,11 +18,11 @@ repositories {
 }
 
 dependencies {
-    implementation("com.github.ajalt.clikt:clikt:5.0.3") {
+    implementation(libs.clikt) {
         exclude(group = "com.github.ajalt.mordant", module = "mordant-jvm-jna")
     }
-    implementation("com.google.code.gson:gson:2.11.0")
-    implementation("com.google.guava:guava:33.3.1-jre")
+    implementation(libs.gson)
+    implementation(libs.guava)
 }
 
 application {
