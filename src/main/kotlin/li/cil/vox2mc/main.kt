@@ -155,8 +155,8 @@ private fun getVoxels(vox: Chunk) = vox.children.flatMapIndexed { index, chunk -
     if (chunk.header.id == ChunkHeader.SIZE_CHUNK_ID) {
         require(chunk.content is SizeContent)
         val size = chunk.content.size
-        require(size.x == MODEL_RESOLUTION && size.y == MODEL_RESOLUTION && size.z == MODEL_RESOLUTION) {
-            "Model must be exactly ${MODEL_RESOLUTION}^3 voxels, got $size."
+        require(size.x <= MODEL_RESOLUTION && size.y <= MODEL_RESOLUTION && size.z <= MODEL_RESOLUTION) {
+            "Model must fit within ${MODEL_RESOLUTION}^3 voxels, got $size."
         }
         val data = vox.children[index + 1]
         require(data.header.id == ChunkHeader.XYZI_CHUNK_ID)
