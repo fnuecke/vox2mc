@@ -4,7 +4,7 @@ plugins {
     `maven-publish`
 }
 
-val semver: String by project
+val semver = providers.gradleProperty("semver").get()
 
 group = "li.cil.vox2mc"
 version = semver
